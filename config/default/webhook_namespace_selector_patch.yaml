@@ -1,0 +1,19 @@
+---
+# Patch to add namespace selector to mutating webhook configuration
+# This prevents the webhook from intercepting its own pod creation and system namespaces
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: workload-identity-injection
+webhooks:
+- name: wif-injection.workload-identity.io
+  namespaceSelector:
+    matchExpressions:
+    - key: kubernetes.io/metadata.name
+      operator: NotIn
+      values:
+      - workload-identity-system
+      - kube-system
+      - kube-public
+      - cert-manager
+      - local-path-storage

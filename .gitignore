@@ -1,0 +1,63 @@
+# Terraform
+**/.terraform/
+**/.terraform.lock.hcl
+**/terraform.tfstate
+**/terraform.tfstate.backup
+**/terraform.tfstate.*.backup
+**/terraform.tfvars.backup
+**/terraform.tfvars.json
+**/*.tfplan
+**/*.tfplan.*
+**/.terraformrc
+**/terraform.rc
+
+# Go
+**/vendor/
+**/*.exe
+**/*.exe~
+**/*.dll
+**/*.so
+**/*.dylib
+**/*.test
+**/*.out
+**/go.work
+
+# Go binaries (specific to this project)
+examples/direct-federated/direct-federated
+examples/service-account-impersonation/service-account-impersonation
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+
+# Docker
+**/.dockerignore
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Kubernetes
+kubeconfig
+scripts/generate-wif-config
+
+# Kubebuilder
+bin/
+testbin/
+cover.out

@@ -1,0 +1,46 @@
+# WIF Configuration Replacements
+# These replacements substitute template variables with actual values
+# For e2e testing, these can be replaced by terraform outputs
+replacements:
+- source:
+    kind: ConfigMap
+    version: v1
+    name: wif-config
+    fieldPath: .data.PROJECT_NUMBER
+  targets:
+  - select:
+      kind: ConfigMap
+      version: v1
+      name: wif-config
+    fieldPaths:
+    - .data.PROJECT_NUMBER
+    options:
+      create: false
+- source:
+    kind: ConfigMap
+    version: v1  
+    name: wif-config
+    fieldPath: .data.POOL_ID
+  targets:
+  - select:
+      kind: ConfigMap
+      version: v1
+      name: wif-config  
+    fieldPaths:
+    - .data.POOL_ID
+    options:
+      create: false
+- source:
+    kind: ConfigMap
+    version: v1
+    name: wif-config
+    fieldPath: .data.PROVIDER_ID
+  targets:
+  - select:
+      kind: ConfigMap
+      version: v1
+      name: wif-config
+    fieldPaths:
+    - .data.PROVIDER_ID
+    options:
+      create: false

@@ -1,0 +1,12 @@
+name: commitlint
+
+on: [push, pull_request]
+
+jobs:
+  commitlint:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Run commitlint
+        uses: opensource-nepal/commitlint@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
