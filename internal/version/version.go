@@ -1,4 +1,4 @@
 package version
 
 // Version is the current tagged release of the webhook.
-const Version = "0.1.0" // x-release-please-version
+const Version = "0.2.0" // x-release-please-version
