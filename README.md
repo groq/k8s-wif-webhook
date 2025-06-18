@@ -2,6 +2,8 @@
 
 A Kubernetes admission webhook that automatically injects Google Cloud Workload Identity Federation (WIF) configuration into pods, eliminating the need for service account keys.
 
+[![Container Image](https://ghcr-badge.egpl.dev/fujin/k8s-wif-webhook/latest_by_date?color=%2344cc11&ignore=latest)](https://github.com/fujin/k8s-wif-webhook/pkgs/container/k8s-wif-webhook)
+
 ## Overview
 
 This webhook transparently configures pods to use WIF for Google Cloud authentication by:
@@ -11,7 +13,7 @@ This webhook transparently configures pods to use WIF for Google Cloud authentic
 
 ## Features
 
-- **Zero-touch WIF injection**: Automatically configures all pods by default
+- **Zero-touch WIF injection**: Automatically configures all pods by default with no manual setup
 - **Opt-out model**: Use annotations to disable injection when needed
 - **Two WIF modes**: Direct federated identity or service account impersonation
 - **Environment-driven config**: Configure via environment variables
