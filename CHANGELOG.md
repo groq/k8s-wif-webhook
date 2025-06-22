@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/fujin/k8s-wif-webhook/compare/v0.4.0...v0.4.1) (2025-06-22)
+
+
+### Bug Fixes
+
+* add RBAC permissions for Kubernetes events ([d1bc44d](https://github.com/fujin/k8s-wif-webhook/commit/d1bc44d023e6774a7f5a052aa87adb23c6cf5bd9))
+
 ## [0.4.0](https://github.com/fujin/k8s-wif-webhook/compare/v0.3.0...v0.4.0) (2025-06-22)
 
 
