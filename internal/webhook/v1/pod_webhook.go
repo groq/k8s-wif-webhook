@@ -53,6 +53,15 @@ var (
 		},
 		[]string{"operation", "result"},
 	)
+
+	// injectionOperations tracks WIF injection attempts and skipped cases
+	injectionOperations = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "wif_injection_operations_total",
+			Help: "Total number of WIF injection operations",
+		},
+		[]string{"component", "action", "reason"},
+	)
 )
 
 func init() {
@@ -61,7 +70,7 @@ func init() {
 	// - controller_runtime_webhook_latency_seconds
 	// - controller_runtime_webhook_requests_total
 	// - controller_runtime_webhook_requests_in_flight
-	metrics.Registry.MustRegister(configMapOperations)
+	metrics.Registry.MustRegister(configMapOperations, injectionOperations)
 }
 
 // SetupPodWebhookWithManager registers the webhook for Pod in the manager.
@@ -349,8 +358,10 @@ func injectWorkloadIdentityConfig(pod *corev1.Pod, config *WIFConfig) {
 			},
 		}
 		pod.Spec.Volumes = append(pod.Spec.Volumes, tokenVolume)
+		injectionOperations.WithLabelValues("volume", "injected", "success").Inc()
 	} else {
 		podlog.V(1).Info("Skipped token volume injection - volume already exists", "pod", pod.GetName(), "volume", "token")
+		injectionOperations.WithLabelValues("volume", "skipped", "already_exists").Inc()
 	}
 
 	// Add credentials config volume if it doesn't exist (ConfigMap is created on-demand)
@@ -367,8 +378,10 @@ func injectWorkloadIdentityConfig(pod *corev1.Pod, config *WIFConfig) {
 			},
 		}
 		pod.Spec.Volumes = append(pod.Spec.Volumes, credentialsVolume)
+		injectionOperations.WithLabelValues("volume", "injected", "success").Inc()
 	} else {
 		podlog.V(1).Info("Skipped credentials volume injection - volume already exists", "pod", pod.GetName(), "volume", credentialsVolumeName)
+		injectionOperations.WithLabelValues("volume", "skipped", "already_exists").Inc()
 	}
 
 	// Add volume mounts and environment variables to all containers
@@ -385,12 +398,15 @@ func injectWorkloadIdentityConfig(pod *corev1.Pod, config *WIFConfig) {
 					ReadOnly:  true,
 				},
 			)
+			injectionOperations.WithLabelValues("mount", "injected", "success").Inc()
 		} else {
 			if volumeMountExists(container, "token") {
 				podlog.V(1).Info("Skipped token mount injection - volume mount already exists", "pod", pod.GetName(), "container", container.Name, "volume", "token")
+				injectionOperations.WithLabelValues("mount", "skipped", "volume_mount_exists").Inc()
 			}
 			if mountPathExists(container, tokenMountPath) {
 				podlog.V(1).Info("Skipped token mount injection - mount path already in use", "pod", pod.GetName(), "container", container.Name, "path", tokenMountPath)
+				injectionOperations.WithLabelValues("mount", "skipped", "path_conflict").Inc()
 			}
 		}
 
@@ -403,12 +419,15 @@ func injectWorkloadIdentityConfig(pod *corev1.Pod, config *WIFConfig) {
 					ReadOnly:  true,
 				},
 			)
+			injectionOperations.WithLabelValues("mount", "injected", "success").Inc()
 		} else {
 			if volumeMountExists(container, credentialsVolumeName) {
 				podlog.V(1).Info("Skipped credentials mount injection - volume mount already exists", "pod", pod.GetName(), "container", container.Name, "volume", credentialsVolumeName)
+				injectionOperations.WithLabelValues("mount", "skipped", "volume_mount_exists").Inc()
 			}
 			if mountPathExists(container, credentialsMountPath) {
 				podlog.V(1).Info("Skipped credentials mount injection - mount path already in use", "pod", pod.GetName(), "container", container.Name, "path", credentialsMountPath)
+				injectionOperations.WithLabelValues("mount", "skipped", "path_conflict").Inc()
 			}
 		}
 
@@ -418,8 +437,10 @@ func injectWorkloadIdentityConfig(pod *corev1.Pod, config *WIFConfig) {
 				Name:  "GOOGLE_APPLICATION_CREDENTIALS",
 				Value: "/etc/workload-identity/credentials.json",
 			})
+			injectionOperations.WithLabelValues("env", "injected", "success").Inc()
 		} else {
 			podlog.V(1).Info("Skipped GOOGLE_APPLICATION_CREDENTIALS injection - env var already exists", "pod", pod.GetName(), "container", container.Name, "env", "GOOGLE_APPLICATION_CREDENTIALS")
+			injectionOperations.WithLabelValues("env", "skipped", "already_exists").Inc()
 		}
 	}
 }
