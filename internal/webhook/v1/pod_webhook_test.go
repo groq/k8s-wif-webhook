@@ -57,7 +57,7 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 			},
 		}
 
-		injectWorkloadIdentityConfig(pod, config)
+		injectWorkloadIdentityConfig(nil, pod, config)
 
 		// Find the projected token volume
 		var tokenVolume *corev1.Volume
@@ -97,7 +97,7 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 			},
 		}
 
-		injectWorkloadIdentityConfig(pod, config)
+		injectWorkloadIdentityConfig(nil, pod, config)
 
 		// Find the projected token volume
 		var tokenVolume *corev1.Volume
@@ -135,7 +135,7 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 			},
 		}
 
-		injectWorkloadIdentityConfig(pod, config)
+		injectWorkloadIdentityConfig(nil, pod, config)
 
 		assert.Len(t, pod.Spec.Containers[0].VolumeMounts, 2, "Expected two volume mounts")
 
@@ -169,7 +169,7 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 			},
 		}
 
-		injectWorkloadIdentityConfig(pod, config)
+		injectWorkloadIdentityConfig(nil, pod, config)
 
 		assert.Len(t, pod.Spec.Containers[0].Env, 1, "Expected one environment variable")
 		envVar := pod.Spec.Containers[0].Env[0]
@@ -214,7 +214,7 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 			},
 		}
 
-		injectWorkloadIdentityConfig(pod, config)
+		injectWorkloadIdentityConfig(nil, pod, config)
 
 		// Should have original + 2 new volumes (no duplicates)
 		assert.Len(t, pod.Spec.Volumes, 3, "Expected existing volume + 2 WIF volumes")
@@ -268,7 +268,7 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 		}
 
 		// This should cause duplicate volume names after injection
-		injectWorkloadIdentityConfig(pod, config)
+		injectWorkloadIdentityConfig(nil, pod, config)
 
 		// Bug: Currently creates duplicate volume names
 		volumeNames := make([]string, len(pod.Spec.Volumes))
@@ -311,7 +311,7 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 			},
 		}
 
-		injectWorkloadIdentityConfig(pod, config)
+		injectWorkloadIdentityConfig(nil, pod, config)
 
 		// Count mounts at same path - should be 1 but will be 2 due to bug
 		pathCount := 0
@@ -347,7 +347,7 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 			},
 		}
 
-		injectWorkloadIdentityConfig(pod, config)
+		injectWorkloadIdentityConfig(nil, pod, config)
 
 		// Count GOOGLE_APPLICATION_CREDENTIALS env vars - should be 1 but will be 2 due to bug
 		credsCount := 0
