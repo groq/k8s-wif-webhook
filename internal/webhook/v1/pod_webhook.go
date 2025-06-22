@@ -330,61 +330,77 @@ func injectWorkloadIdentityConfig(pod *corev1.Pod, config *WIFConfig) {
 	// Use default token expiration (3600 seconds / 1 hour)
 	expirationSeconds := int64(3600)
 
-	// Add projected token volume
-	tokenVolume := corev1.Volume{
-		Name: "token",
-		VolumeSource: corev1.VolumeSource{
-			Projected: &corev1.ProjectedVolumeSource{
-				Sources: []corev1.VolumeProjection{
-					{
-						ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-							Audience:          audience,
-							ExpirationSeconds: &expirationSeconds,
-							Path:              "token",
+	// Add projected token volume if it doesn't exist
+	if !volumeExists(pod, "token") {
+		tokenVolume := corev1.Volume{
+			Name: "token",
+			VolumeSource: corev1.VolumeSource{
+				Projected: &corev1.ProjectedVolumeSource{
+					Sources: []corev1.VolumeProjection{
+						{
+							ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+								Audience:          audience,
+								ExpirationSeconds: &expirationSeconds,
+								Path:              "token",
+							},
 						},
 					},
 				},
 			},
-		},
+		}
+		pod.Spec.Volumes = append(pod.Spec.Volumes, tokenVolume)
 	}
-	pod.Spec.Volumes = append(pod.Spec.Volumes, tokenVolume)
 
-	// Add credentials config volume (ConfigMap is created on-demand)
-	credentialsVolume := corev1.Volume{
-		Name: "workload-identity-credential-configuration",
-		VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: config.CredentialsConfigMap,
+	// Add credentials config volume if it doesn't exist (ConfigMap is created on-demand)
+	credentialsVolumeName := "workload-identity-credential-configuration"
+	if !volumeExists(pod, credentialsVolumeName) {
+		credentialsVolume := corev1.Volume{
+			Name: credentialsVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: config.CredentialsConfigMap,
+					},
 				},
 			},
-		},
+		}
+		pod.Spec.Volumes = append(pod.Spec.Volumes, credentialsVolume)
 	}
-	pod.Spec.Volumes = append(pod.Spec.Volumes, credentialsVolume)
 
 	// Add volume mounts and environment variables to all containers
 	for i := range pod.Spec.Containers {
 		container := &pod.Spec.Containers[i]
 
-		// Add volume mounts
-		container.VolumeMounts = append(container.VolumeMounts,
-			corev1.VolumeMount{
-				Name:      "token",
-				MountPath: "/var/run/service-account",
-				ReadOnly:  true,
-			},
-			corev1.VolumeMount{
-				Name:      "workload-identity-credential-configuration",
-				MountPath: "/etc/workload-identity",
-				ReadOnly:  true,
-			},
-		)
+		// Add volume mounts if they don't exist
+		tokenMountPath := "/var/run/service-account"
+		if !volumeMountExists(container, "token") && !mountPathExists(container, tokenMountPath) {
+			container.VolumeMounts = append(container.VolumeMounts,
+				corev1.VolumeMount{
+					Name:      "token",
+					MountPath: tokenMountPath,
+					ReadOnly:  true,
+				},
+			)
+		}
 
-		// Add environment variable
-		container.Env = append(container.Env, corev1.EnvVar{
-			Name:  "GOOGLE_APPLICATION_CREDENTIALS",
-			Value: "/etc/workload-identity/credentials.json",
-		})
+		credentialsMountPath := "/etc/workload-identity"
+		if !volumeMountExists(container, credentialsVolumeName) && !mountPathExists(container, credentialsMountPath) {
+			container.VolumeMounts = append(container.VolumeMounts,
+				corev1.VolumeMount{
+					Name:      credentialsVolumeName,
+					MountPath: credentialsMountPath,
+					ReadOnly:  true,
+				},
+			)
+		}
+
+		// Add environment variable if it doesn't exist
+		if !envVarExists(container, "GOOGLE_APPLICATION_CREDENTIALS") {
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name:  "GOOGLE_APPLICATION_CREDENTIALS",
+				Value: "/etc/workload-identity/credentials.json",
+			})
+		}
 	}
 }
 
@@ -434,4 +450,44 @@ func generateCredentialsConfig(config *WIFConfig) string {
 		data, _ := json.MarshalIndent(credConfig, "", "  ")
 		return string(data)
 	}
+}
+
+// volumeExists checks if a volume with the given name already exists in the pod
+func volumeExists(pod *corev1.Pod, volumeName string) bool {
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name == volumeName {
+			return true
+		}
+	}
+	return false
+}
+
+// volumeMountExists checks if a volume mount with the given name already exists in the container
+func volumeMountExists(container *corev1.Container, volumeName string) bool {
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == volumeName {
+			return true
+		}
+	}
+	return false
+}
+
+// envVarExists checks if an environment variable with the given name already exists in the container
+func envVarExists(container *corev1.Container, envName string) bool {
+	for _, env := range container.Env {
+		if env.Name == envName {
+			return true
+		}
+	}
+	return false
+}
+
+// mountPathExists checks if a mount path already exists in the container
+func mountPathExists(container *corev1.Container, mountPath string) bool {
+	for _, mount := range container.VolumeMounts {
+		if mount.MountPath == mountPath {
+			return true
+		}
+	}
+	return false
 }

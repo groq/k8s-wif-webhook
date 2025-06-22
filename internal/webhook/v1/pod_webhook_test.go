@@ -243,7 +243,7 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 		assert.Contains(t, envNames, "GOOGLE_APPLICATION_CREDENTIALS")
 	})
 
-	t.Run("should fail when conflicting volume names exist", func(t *testing.T) {
+	t.Run("should skip injection when conflicting volume names exist", func(t *testing.T) {
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-pod",
@@ -284,11 +284,11 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 			}
 		}
 		
-		// This assertion will fail, demonstrating the bug
-		assert.Equal(t, 1, tokenCount, "Should only have one 'token' volume, but found duplicates")
+		// This should now pass - webhook skips injection for conflicting volume names
+		assert.Equal(t, 1, tokenCount, "Should only have one 'token' volume - injection was skipped")
 	})
 
-	t.Run("should fail when conflicting mount paths exist", func(t *testing.T) {
+	t.Run("should skip injection when conflicting mount paths exist", func(t *testing.T) {
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-pod",
@@ -321,11 +321,11 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 			}
 		}
 		
-		// This assertion will fail, demonstrating the bug
-		assert.Equal(t, 1, pathCount, "Should only have one mount at '/var/run/service-account', but found duplicates")
+		// This should now pass - webhook skips injection for conflicting mount paths
+		assert.Equal(t, 1, pathCount, "Should only have one mount at '/var/run/service-account' - injection was skipped")
 	})
 
-	t.Run("should fail when GOOGLE_APPLICATION_CREDENTIALS already exists", func(t *testing.T) {
+	t.Run("should skip injection when GOOGLE_APPLICATION_CREDENTIALS already exists", func(t *testing.T) {
 		pod := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-pod",
@@ -357,8 +357,8 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 			}
 		}
 		
-		// This assertion will fail, demonstrating the bug
-		assert.Equal(t, 1, credsCount, "Should only have one GOOGLE_APPLICATION_CREDENTIALS env var, but found duplicates")
+		// This should now pass - webhook skips injection for existing env vars
+		assert.Equal(t, 1, credsCount, "Should only have one GOOGLE_APPLICATION_CREDENTIALS env var - injection was skipped")
 	})
 
 }
