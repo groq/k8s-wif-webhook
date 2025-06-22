@@ -349,6 +349,8 @@ func injectWorkloadIdentityConfig(pod *corev1.Pod, config *WIFConfig) {
 			},
 		}
 		pod.Spec.Volumes = append(pod.Spec.Volumes, tokenVolume)
+	} else {
+		podlog.V(1).Info("Skipped token volume injection - volume already exists", "pod", pod.GetName(), "volume", "token")
 	}
 
 	// Add credentials config volume if it doesn't exist (ConfigMap is created on-demand)
@@ -365,6 +367,8 @@ func injectWorkloadIdentityConfig(pod *corev1.Pod, config *WIFConfig) {
 			},
 		}
 		pod.Spec.Volumes = append(pod.Spec.Volumes, credentialsVolume)
+	} else {
+		podlog.V(1).Info("Skipped credentials volume injection - volume already exists", "pod", pod.GetName(), "volume", credentialsVolumeName)
 	}
 
 	// Add volume mounts and environment variables to all containers
@@ -381,6 +385,13 @@ func injectWorkloadIdentityConfig(pod *corev1.Pod, config *WIFConfig) {
 					ReadOnly:  true,
 				},
 			)
+		} else {
+			if volumeMountExists(container, "token") {
+				podlog.V(1).Info("Skipped token mount injection - volume mount already exists", "pod", pod.GetName(), "container", container.Name, "volume", "token")
+			}
+			if mountPathExists(container, tokenMountPath) {
+				podlog.V(1).Info("Skipped token mount injection - mount path already in use", "pod", pod.GetName(), "container", container.Name, "path", tokenMountPath)
+			}
 		}
 
 		credentialsMountPath := "/etc/workload-identity"
@@ -392,6 +403,13 @@ func injectWorkloadIdentityConfig(pod *corev1.Pod, config *WIFConfig) {
 					ReadOnly:  true,
 				},
 			)
+		} else {
+			if volumeMountExists(container, credentialsVolumeName) {
+				podlog.V(1).Info("Skipped credentials mount injection - volume mount already exists", "pod", pod.GetName(), "container", container.Name, "volume", credentialsVolumeName)
+			}
+			if mountPathExists(container, credentialsMountPath) {
+				podlog.V(1).Info("Skipped credentials mount injection - mount path already in use", "pod", pod.GetName(), "container", container.Name, "path", credentialsMountPath)
+			}
 		}
 
 		// Add environment variable if it doesn't exist
@@ -400,6 +418,8 @@ func injectWorkloadIdentityConfig(pod *corev1.Pod, config *WIFConfig) {
 				Name:  "GOOGLE_APPLICATION_CREDENTIALS",
 				Value: "/etc/workload-identity/credentials.json",
 			})
+		} else {
+			podlog.V(1).Info("Skipped GOOGLE_APPLICATION_CREDENTIALS injection - env var already exists", "pod", pod.GetName(), "container", container.Name, "env", "GOOGLE_APPLICATION_CREDENTIALS")
 		}
 	}
 }
