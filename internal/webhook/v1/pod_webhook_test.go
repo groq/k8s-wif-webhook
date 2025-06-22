@@ -177,6 +177,190 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 		assert.Equal(t, "/etc/workload-identity/credentials.json", envVar.Value, "Expected correct env var value")
 	})
 
+	t.Run("should handle existing volumes without creating duplicates", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pod",
+				Namespace: "default",
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "test-container",
+						Image: "nginx",
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "existing-mount",
+								MountPath: "/existing",
+								ReadOnly:  true,
+							},
+						},
+						Env: []corev1.EnvVar{
+							{
+								Name:  "EXISTING_VAR",
+								Value: "existing_value",
+							},
+						},
+					},
+				},
+				Volumes: []corev1.Volume{
+					{
+						Name: "existing-volume",
+						VolumeSource: corev1.VolumeSource{
+							EmptyDir: &corev1.EmptyDirVolumeSource{},
+						},
+					},
+				},
+			},
+		}
+
+		injectWorkloadIdentityConfig(pod, config)
+
+		// Should have original + 2 new volumes (no duplicates)
+		assert.Len(t, pod.Spec.Volumes, 3, "Expected existing volume + 2 WIF volumes")
+		
+		// Check volumes exist and are correct
+		volumeNames := make([]string, len(pod.Spec.Volumes))
+		for i, v := range pod.Spec.Volumes {
+			volumeNames[i] = v.Name
+		}
+		assert.Contains(t, volumeNames, "existing-volume")
+		assert.Contains(t, volumeNames, "token")
+		assert.Contains(t, volumeNames, "workload-identity-credential-configuration")
+
+		// Should have original + 2 new volume mounts (no duplicates)
+		assert.Len(t, pod.Spec.Containers[0].VolumeMounts, 3, "Expected existing mount + 2 WIF mounts")
+		
+		// Should have original + 1 new env var (no duplicates)
+		assert.Len(t, pod.Spec.Containers[0].Env, 2, "Expected existing env + 1 WIF env")
+		
+		// Check env vars exist and are correct
+		envNames := make([]string, len(pod.Spec.Containers[0].Env))
+		for i, e := range pod.Spec.Containers[0].Env {
+			envNames[i] = e.Name
+		}
+		assert.Contains(t, envNames, "EXISTING_VAR")
+		assert.Contains(t, envNames, "GOOGLE_APPLICATION_CREDENTIALS")
+	})
+
+	t.Run("should fail when conflicting volume names exist", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pod",
+				Namespace: "default",
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "test-container",
+						Image: "nginx",
+					},
+				},
+				Volumes: []corev1.Volume{
+					{
+						Name: "token", // Conflicts with WIF volume name
+						VolumeSource: corev1.VolumeSource{
+							EmptyDir: &corev1.EmptyDirVolumeSource{},
+						},
+					},
+				},
+			},
+		}
+
+		// This should cause duplicate volume names after injection
+		injectWorkloadIdentityConfig(pod, config)
+
+		// Bug: Currently creates duplicate volume names
+		volumeNames := make([]string, len(pod.Spec.Volumes))
+		for i, v := range pod.Spec.Volumes {
+			volumeNames[i] = v.Name
+		}
+		
+		// Count "token" volumes - should be 1 but will be 2 due to bug
+		tokenCount := 0
+		for _, name := range volumeNames {
+			if name == "token" {
+				tokenCount++
+			}
+		}
+		
+		// This assertion will fail, demonstrating the bug
+		assert.Equal(t, 1, tokenCount, "Should only have one 'token' volume, but found duplicates")
+	})
+
+	t.Run("should fail when conflicting mount paths exist", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pod",
+				Namespace: "default",
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "test-container",
+						Image: "nginx",
+						VolumeMounts: []corev1.VolumeMount{
+							{
+								Name:      "existing-token",
+								MountPath: "/var/run/service-account", // Conflicts with WIF mount path
+								ReadOnly:  true,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		injectWorkloadIdentityConfig(pod, config)
+
+		// Count mounts at same path - should be 1 but will be 2 due to bug
+		pathCount := 0
+		for _, mount := range pod.Spec.Containers[0].VolumeMounts {
+			if mount.MountPath == "/var/run/service-account" {
+				pathCount++
+			}
+		}
+		
+		// This assertion will fail, demonstrating the bug
+		assert.Equal(t, 1, pathCount, "Should only have one mount at '/var/run/service-account', but found duplicates")
+	})
+
+	t.Run("should fail when GOOGLE_APPLICATION_CREDENTIALS already exists", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pod",
+				Namespace: "default",
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "test-container",
+						Image: "nginx",
+						Env: []corev1.EnvVar{
+							{
+								Name:  "GOOGLE_APPLICATION_CREDENTIALS",
+								Value: "/existing/path/to/creds.json",
+							},
+						},
+					},
+				},
+			},
+		}
+
+		injectWorkloadIdentityConfig(pod, config)
+
+		// Count GOOGLE_APPLICATION_CREDENTIALS env vars - should be 1 but will be 2 due to bug
+		credsCount := 0
+		for _, env := range pod.Spec.Containers[0].Env {
+			if env.Name == "GOOGLE_APPLICATION_CREDENTIALS" {
+				credsCount++
+			}
+		}
+		
+		// This assertion will fail, demonstrating the bug
+		assert.Equal(t, 1, credsCount, "Should only have one GOOGLE_APPLICATION_CREDENTIALS env var, but found duplicates")
+	})
+
 }
 
 // BenchmarkWebhookDefault measures webhook performance
