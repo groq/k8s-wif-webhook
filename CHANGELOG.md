@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.0](https://github.com/fujin/k8s-wif-webhook/compare/v0.3.0...v0.4.0) (2025-06-22)
+
+
+### Features
+
+* add detailed logging for skipped injection cases ([4f94b7b](https://github.com/fujin/k8s-wif-webhook/commit/4f94b7b4fefac86f3c344077a60f0897b9c627da))
+* add metrics for injection operations and conflicts ([3be77d1](https://github.com/fujin/k8s-wif-webhook/commit/3be77d16be0958debacb70e505e3e62c7afaa10f))
+* promote conflict logs to Info level and add Kubernetes events ([ec90c73](https://github.com/fujin/k8s-wif-webhook/commit/ec90c73d54cfb8c6d48891b86b5d1c5dd302e6bd))
+
+
+### Bug Fixes
+
+* prevent duplicate field injection in webhook ([a0c7774](https://github.com/fujin/k8s-wif-webhook/commit/a0c77745d7651b2f40ce235ee58fe78adf340983))
+
 ## [0.3.0](https://github.com/fujin/k8s-wif-webhook/compare/v0.2.0...v0.3.0) (2025-06-18)
 
 
