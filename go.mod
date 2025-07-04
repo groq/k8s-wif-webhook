@@ -1,4 +1,4 @@
-module github.com/fujin/k8s-wif-webhook
+module github.com/groq/k8s-wif-webhook
 
 go 1.24.0
 

@@ -2,7 +2,7 @@
 
 A Kubernetes admission webhook that automatically injects Google Cloud Workload Identity Federation (WIF) configuration into pods, eliminating the need for service account keys.
 
-[![Container Image](https://ghcr-badge.egpl.dev/fujin/k8s-wif-webhook/latest_by_date?color=%2344cc11&ignore=latest)](https://github.com/fujin/k8s-wif-webhook/pkgs/container/k8s-wif-webhook)
+[![Container Image](https://ghcr-badge.egpl.dev/groq/k8s-wif-webhook/latest_by_date?color=%2344cc11&ignore=latest)](https://github.com/groq/k8s-wif-webhook/pkgs/container/k8s-wif-webhook)
 
 ## Overview
 
@@ -58,10 +58,10 @@ metadata:
 The webhook is distributed as a container image:
 
 ```yaml
-image: ghcr.io/fujin/k8s-wif-webhook:latest
+image: ghcr.io/groq/k8s-wif-webhook:latest
 ```
 
-See the [releases page](https://github.com/fujin/k8s-wif-webhook/releases) for specific versions.
+See the [releases page](https://github.com/groq/k8s-wif-webhook/releases) for specific versions.
 
 ## License
 

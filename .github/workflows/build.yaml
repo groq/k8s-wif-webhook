@@ -16,7 +16,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: fujin/k8s-wif-webhook
+  IMAGE_NAME: groq/k8s-wif-webhook
 
 jobs:
   build:

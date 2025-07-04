@@ -218,7 +218,7 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 
 		// Should have original + 2 new volumes (no duplicates)
 		assert.Len(t, pod.Spec.Volumes, 3, "Expected existing volume + 2 WIF volumes")
-		
+
 		// Check volumes exist and are correct
 		volumeNames := make([]string, len(pod.Spec.Volumes))
 		for i, v := range pod.Spec.Volumes {
@@ -230,10 +230,10 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 
 		// Should have original + 2 new volume mounts (no duplicates)
 		assert.Len(t, pod.Spec.Containers[0].VolumeMounts, 3, "Expected existing mount + 2 WIF mounts")
-		
+
 		// Should have original + 1 new env var (no duplicates)
 		assert.Len(t, pod.Spec.Containers[0].Env, 2, "Expected existing env + 1 WIF env")
-		
+
 		// Check env vars exist and are correct
 		envNames := make([]string, len(pod.Spec.Containers[0].Env))
 		for i, e := range pod.Spec.Containers[0].Env {
@@ -275,7 +275,7 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 		for i, v := range pod.Spec.Volumes {
 			volumeNames[i] = v.Name
 		}
-		
+
 		// Count "token" volumes - should be 1 but will be 2 due to bug
 		tokenCount := 0
 		for _, name := range volumeNames {
@@ -283,7 +283,7 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 				tokenCount++
 			}
 		}
-		
+
 		// This should now pass - webhook skips injection for conflicting volume names
 		assert.Equal(t, 1, tokenCount, "Should only have one 'token' volume - injection was skipped")
 	})
@@ -320,7 +320,7 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 				pathCount++
 			}
 		}
-		
+
 		// This should now pass - webhook skips injection for conflicting mount paths
 		assert.Equal(t, 1, pathCount, "Should only have one mount at '/var/run/service-account' - injection was skipped")
 	})
@@ -356,7 +356,7 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 				credsCount++
 			}
 		}
-		
+
 		// This should now pass - webhook skips injection for existing env vars
 		assert.Equal(t, 1, credsCount, "Should only have one GOOGLE_APPLICATION_CREDENTIALS env var - injection was skipped")
 	})

@@ -7,7 +7,7 @@ domain: k8s-native-wif.io
 layout:
 - go.kubebuilder.io/v4
 projectName: webhook
-repo: github.com/fujin/k8s-wif-webhook
+repo: github.com/groq/k8s-wif-webhook
 resources:
 - core: true
   group: core

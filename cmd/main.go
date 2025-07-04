@@ -37,7 +37,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	webhookv1 "github.com/fujin/k8s-wif-webhook/internal/webhook/v1"
+	webhookv1 "github.com/groq/k8s-wif-webhook/internal/webhook/v1"
 	// +kubebuilder:scaffold:imports
 )
 

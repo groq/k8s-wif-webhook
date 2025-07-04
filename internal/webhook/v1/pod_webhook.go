@@ -364,15 +364,15 @@ func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config
 		pod.Spec.Volumes = append(pod.Spec.Volumes, tokenVolume)
 		injectionOperations.WithLabelValues("volume", "injected", "success").Inc()
 	} else {
-		podlog.Info("Skipped WIF injection due to existing volume", 
-			"pod", pod.GetName(), 
+		podlog.Info("Skipped WIF injection due to existing volume",
+			"pod", pod.GetName(),
 			"namespace", pod.Namespace,
-			"component", "volume", 
+			"component", "volume",
 			"volume", "token",
 			"reason", "already_exists")
 		injectionOperations.WithLabelValues("volume", "skipped", "already_exists").Inc()
 		if d != nil && d.Recorder != nil {
-			d.Recorder.Event(pod, corev1.EventTypeWarning, "WIFInjectionSkipped", 
+			d.Recorder.Event(pod, corev1.EventTypeWarning, "WIFInjectionSkipped",
 				"Skipped token volume injection - volume 'token' already exists")
 		}
 	}
@@ -393,15 +393,15 @@ func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config
 		pod.Spec.Volumes = append(pod.Spec.Volumes, credentialsVolume)
 		injectionOperations.WithLabelValues("volume", "injected", "success").Inc()
 	} else {
-		podlog.Info("Skipped WIF injection due to existing volume", 
-			"pod", pod.GetName(), 
+		podlog.Info("Skipped WIF injection due to existing volume",
+			"pod", pod.GetName(),
 			"namespace", pod.Namespace,
-			"component", "volume", 
+			"component", "volume",
 			"volume", credentialsVolumeName,
 			"reason", "already_exists")
 		injectionOperations.WithLabelValues("volume", "skipped", "already_exists").Inc()
 		if d != nil && d.Recorder != nil {
-			d.Recorder.Event(pod, corev1.EventTypeWarning, "WIFInjectionSkipped", 
+			d.Recorder.Event(pod, corev1.EventTypeWarning, "WIFInjectionSkipped",
 				fmt.Sprintf("Skipped credentials volume injection - volume '%s' already exists", credentialsVolumeName))
 		}
 	}
@@ -423,20 +423,20 @@ func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config
 			injectionOperations.WithLabelValues("mount", "injected", "success").Inc()
 		} else {
 			if volumeMountExists(container, "token") {
-				podlog.Info("Skipped WIF injection due to existing volume mount", 
-					"pod", pod.GetName(), 
+				podlog.Info("Skipped WIF injection due to existing volume mount",
+					"pod", pod.GetName(),
 					"namespace", pod.Namespace,
-					"container", container.Name, 
+					"container", container.Name,
 					"component", "mount",
 					"volume", "token",
 					"reason", "volume_mount_exists")
 				injectionOperations.WithLabelValues("mount", "skipped", "volume_mount_exists").Inc()
 			}
 			if mountPathExists(container, tokenMountPath) {
-				podlog.Info("Skipped WIF injection due to mount path conflict", 
-					"pod", pod.GetName(), 
+				podlog.Info("Skipped WIF injection due to mount path conflict",
+					"pod", pod.GetName(),
 					"namespace", pod.Namespace,
-					"container", container.Name, 
+					"container", container.Name,
 					"component", "mount",
 					"path", tokenMountPath,
 					"reason", "path_conflict")
@@ -456,20 +456,20 @@ func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config
 			injectionOperations.WithLabelValues("mount", "injected", "success").Inc()
 		} else {
 			if volumeMountExists(container, credentialsVolumeName) {
-				podlog.Info("Skipped WIF injection due to existing volume mount", 
-					"pod", pod.GetName(), 
+				podlog.Info("Skipped WIF injection due to existing volume mount",
+					"pod", pod.GetName(),
 					"namespace", pod.Namespace,
-					"container", container.Name, 
+					"container", container.Name,
 					"component", "mount",
 					"volume", credentialsVolumeName,
 					"reason", "volume_mount_exists")
 				injectionOperations.WithLabelValues("mount", "skipped", "volume_mount_exists").Inc()
 			}
 			if mountPathExists(container, credentialsMountPath) {
-				podlog.Info("Skipped WIF injection due to mount path conflict", 
-					"pod", pod.GetName(), 
+				podlog.Info("Skipped WIF injection due to mount path conflict",
+					"pod", pod.GetName(),
 					"namespace", pod.Namespace,
-					"container", container.Name, 
+					"container", container.Name,
 					"component", "mount",
 					"path", credentialsMountPath,
 					"reason", "path_conflict")
@@ -485,10 +485,10 @@ func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config
 			})
 			injectionOperations.WithLabelValues("env", "injected", "success").Inc()
 		} else {
-			podlog.Info("Skipped WIF injection due to existing environment variable", 
-				"pod", pod.GetName(), 
+			podlog.Info("Skipped WIF injection due to existing environment variable",
+				"pod", pod.GetName(),
 				"namespace", pod.Namespace,
-				"container", container.Name, 
+				"container", container.Name,
 				"component", "env",
 				"env", "GOOGLE_APPLICATION_CREDENTIALS",
 				"reason", "already_exists")
