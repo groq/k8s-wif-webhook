@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/groq/k8s-wif-webhook/compare/v0.5.0...v0.5.1) (2025-07-04)
+
+
+### Bug Fixes
+
+* use GROQ_GITHUB_BOT_REPO_TOKEN token for release-please ([c9cc617](https://github.com/groq/k8s-wif-webhook/commit/c9cc617eafb022d3064312aa314b6abd50c18de0))
+
 ## [0.5.0](https://github.com/groq/k8s-wif-webhook/compare/v0.4.1...v0.5.0) (2025-07-04)
 
 
