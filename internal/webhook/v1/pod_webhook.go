@@ -25,6 +25,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
+
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -32,13 +35,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
-	"os"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
-	"strings"
 )
 
 // nolint:unused
@@ -102,6 +103,18 @@ type PodCustomDefaulter struct {
 
 var _ webhook.CustomDefaulter = &PodCustomDefaulter{}
 
+// potentialPodName returns the pod name if available, otherwise a descriptive string
+// This mirrors Istio's approach to handling generateName in admission webhooks
+func potentialPodName(metadata metav1.ObjectMeta) string {
+	if metadata.Name != "" {
+		return metadata.Name
+	}
+	if metadata.GenerateName != "" {
+		return metadata.GenerateName + "***** (actual name not yet known)"
+	}
+	return ""
+}
+
 // Default implements webhook.CustomDefaulter so a webhook will be registered for the Kind Pod.
 func (d *PodCustomDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	pod, ok := obj.(*corev1.Pod)
@@ -109,7 +122,8 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj runtime.Object) er
 		return fmt.Errorf("expected an Pod object but got %T", obj)
 	}
 
-	podlog.Info("Defaulting for Pod", "name", pod.GetName())
+	podName := potentialPodName(pod.ObjectMeta)
+	podlog.Info("Processing pod for WIF injection", "pod", podName, "namespace", pod.Namespace)
 
 	// Skip if pod already has WIF volumes/env vars
 	if hasWorkloadIdentityConfig(pod) {
@@ -160,7 +174,7 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj runtime.Object) er
 	// Inject WIF configuration
 	injectWorkloadIdentityConfig(d, pod, wifConfig)
 
-	podlog.Info("Injected WIF configuration", "pod", pod.GetName(), "serviceAccount", saName)
+	podlog.Info("Injected WIF configuration", "pod", podName, "namespace", pod.Namespace, "serviceAccount", saName)
 	return nil
 }
 
@@ -365,7 +379,7 @@ func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config
 		injectionOperations.WithLabelValues("volume", "injected", "success").Inc()
 	} else {
 		podlog.Info("Skipped WIF injection due to existing volume",
-			"pod", pod.GetName(),
+			"pod", potentialPodName(pod.ObjectMeta),
 			"namespace", pod.Namespace,
 			"component", "volume",
 			"volume", "token",
@@ -394,7 +408,7 @@ func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config
 		injectionOperations.WithLabelValues("volume", "injected", "success").Inc()
 	} else {
 		podlog.Info("Skipped WIF injection due to existing volume",
-			"pod", pod.GetName(),
+			"pod", potentialPodName(pod.ObjectMeta),
 			"namespace", pod.Namespace,
 			"component", "volume",
 			"volume", credentialsVolumeName,
@@ -424,7 +438,7 @@ func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config
 		} else {
 			if volumeMountExists(container, "token") {
 				podlog.Info("Skipped WIF injection due to existing volume mount",
-					"pod", pod.GetName(),
+					"pod", potentialPodName(pod.ObjectMeta),
 					"namespace", pod.Namespace,
 					"container", container.Name,
 					"component", "mount",
@@ -434,7 +448,7 @@ func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config
 			}
 			if mountPathExists(container, tokenMountPath) {
 				podlog.Info("Skipped WIF injection due to mount path conflict",
-					"pod", pod.GetName(),
+					"pod", potentialPodName(pod.ObjectMeta),
 					"namespace", pod.Namespace,
 					"container", container.Name,
 					"component", "mount",
@@ -457,7 +471,7 @@ func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config
 		} else {
 			if volumeMountExists(container, credentialsVolumeName) {
 				podlog.Info("Skipped WIF injection due to existing volume mount",
-					"pod", pod.GetName(),
+					"pod", potentialPodName(pod.ObjectMeta),
 					"namespace", pod.Namespace,
 					"container", container.Name,
 					"component", "mount",
@@ -467,7 +481,7 @@ func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config
 			}
 			if mountPathExists(container, credentialsMountPath) {
 				podlog.Info("Skipped WIF injection due to mount path conflict",
-					"pod", pod.GetName(),
+					"pod", potentialPodName(pod.ObjectMeta),
 					"namespace", pod.Namespace,
 					"container", container.Name,
 					"component", "mount",
@@ -486,7 +500,7 @@ func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config
 			injectionOperations.WithLabelValues("env", "injected", "success").Inc()
 		} else {
 			podlog.Info("Skipped WIF injection due to existing environment variable",
-				"pod", pod.GetName(),
+				"pod", potentialPodName(pod.ObjectMeta),
 				"namespace", pod.Namespace,
 				"container", container.Name,
 				"component", "env",

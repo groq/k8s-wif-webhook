@@ -363,6 +363,163 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 
 }
 
+func TestPotentialPodName(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata metav1.ObjectMeta
+		expected string
+	}{
+		{
+			name: "pod with explicit name",
+			metadata: metav1.ObjectMeta{
+				Name:      "my-pod",
+				Namespace: "default",
+			},
+			expected: "my-pod",
+		},
+		{
+			name: "pod with generateName (typical Deployment pattern)",
+			metadata: metav1.ObjectMeta{
+				GenerateName: "web-deployment-abc123-",
+				Namespace:    "default",
+			},
+			expected: "web-deployment-abc123-***** (actual name not yet known)",
+		},
+		{
+			name: "pod with both name and generateName (name takes precedence)",
+			metadata: metav1.ObjectMeta{
+				Name:         "explicit-name",
+				GenerateName: "should-be-ignored-",
+				Namespace:    "default",
+			},
+			expected: "explicit-name",
+		},
+		{
+			name: "pod with neither name nor generateName",
+			metadata: metav1.ObjectMeta{
+				Namespace: "default",
+			},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := potentialPodName(tt.metadata)
+			assert.Equal(t, tt.expected, actual)
+		})
+	}
+}
+
+func TestPodWebhookIntegration(t *testing.T) {
+	// Set required environment variables for testing
+	os.Setenv("PROJECT_NUMBER", "123456789")
+	os.Setenv("POOL_ID", "test-pool")
+	os.Setenv("PROVIDER_ID", "test-provider")
+	defer func() {
+		os.Unsetenv("PROJECT_NUMBER")
+		os.Unsetenv("POOL_ID")
+		os.Unsetenv("PROVIDER_ID")
+	}()
+
+	testSA := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "default",
+			Namespace: "default",
+		},
+	}
+
+	runtimeScheme := runtime.NewScheme()
+	require.NoError(t, scheme.AddToScheme(runtimeScheme))
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(runtimeScheme).
+		WithObjects(testSA).
+		Build()
+
+	webhook := &PodCustomDefaulter{
+		Client: fakeClient,
+		Cache:  fakeClient,
+	}
+
+	ctx := context.Background()
+
+	tests := []struct {
+		name string
+		pod  *corev1.Pod
+	}{
+		{
+			name: "pod with explicit name",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "explicit-pod-name",
+					Namespace: "default",
+				},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "default",
+					Containers: []corev1.Container{
+						{Name: "app", Image: "nginx"},
+					},
+				},
+			},
+		},
+		{
+			name: "pod with generateName (Deployment pattern)",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: "web-deployment-abc123-",
+					Namespace:    "default",
+				},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "default",
+					Containers: []corev1.Container{
+						{Name: "app", Image: "nginx"},
+					},
+				},
+			},
+		},
+		{
+			name: "pod with neither name nor generateName",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+				},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "default",
+					Containers: []corev1.Container{
+						{Name: "app", Image: "nginx"},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test that webhook processes without error
+			err := webhook.Default(ctx, tt.pod)
+			require.NoError(t, err)
+
+			// Verify WIF injection occurred
+			assert.True(t, hasWorkloadIdentityConfig(tt.pod), "WIF configuration should be injected")
+
+			// Verify volumes were added
+			assert.Len(t, tt.pod.Spec.Volumes, 2, "Should have token and credentials volumes")
+
+			// Verify container modifications
+			require.Len(t, tt.pod.Spec.Containers, 1, "Should still have one container")
+			container := tt.pod.Spec.Containers[0]
+
+			// Check volume mounts
+			assert.Len(t, container.VolumeMounts, 2, "Should have WIF volume mounts")
+
+			// Check environment variable
+			assert.Len(t, container.Env, 1, "Should have GOOGLE_APPLICATION_CREDENTIALS env var")
+			assert.Equal(t, "GOOGLE_APPLICATION_CREDENTIALS", container.Env[0].Name)
+		})
+	}
+}
+
 // BenchmarkWebhookDefault measures webhook performance
 func BenchmarkWebhookDefault(b *testing.B) {
 	// Set required environment variables for testing
