@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/groq/k8s-wif-webhook/compare/v0.5.1...v0.5.2) (2025-07-08)
+
+
+### Bug Fixes
+
+* empty pod names in admission webhook logs ([3d8e2f6](https://github.com/groq/k8s-wif-webhook/commit/3d8e2f63392522204833affb0f5b93884a83bdae))
+
 ## [0.5.1](https://github.com/groq/k8s-wif-webhook/compare/v0.5.0...v0.5.1) (2025-07-04)
 
 
