@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0](https://github.com/groq/k8s-wif-webhook/compare/v0.5.2...v1.0.0) (2025-08-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* no mutation on pod update ([#7](https://github.com/groq/k8s-wif-webhook/issues/7))
+
+### Bug Fixes
+
+* no mutation on pod update ([#7](https://github.com/groq/k8s-wif-webhook/issues/7)) ([5539550](https://github.com/groq/k8s-wif-webhook/commit/5539550ba014b4f79f8edcc39bfa99808f5b0d68))
+* the real treasure was the defaults we had along the way ([#5](https://github.com/groq/k8s-wif-webhook/issues/5)) ([7322a03](https://github.com/groq/k8s-wif-webhook/commit/7322a03a4521b88b495eb993e2019a35776c8664))
+
 ## [0.5.2](https://github.com/groq/k8s-wif-webhook/compare/v0.5.1...v0.5.2) (2025-07-08)
 
 
