@@ -87,11 +87,11 @@ func SetupPodWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-// +kubebuilder:webhook:path=/mutate--v1-pod,mutating=true,failurePolicy=fail,sideEffects=None,groups="",resources=pods,verbs=create;update,versions=v1,name=wif-injection.workload-identity.io,admissionReviewVersions=v1,timeoutSeconds=10
+// +kubebuilder:webhook:path=/mutate--v1-pod,mutating=true,failurePolicy=fail,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=wif-injection.workload-identity.io,admissionReviewVersions=v1,timeoutSeconds=10
 // +kubebuilder:webhookconfiguration:mutating=true,name=workload-identity-injection
 
 // PodCustomDefaulter struct is responsible for setting default values on the custom resource of the
-// Kind Pod when those are created or updated.
+// Kind Pod when those are created.
 //
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as it is used only for temporary operations and does not need to be deeply copied.
@@ -348,8 +348,65 @@ func getConfigMapType(config *WIFConfig) string {
 	return "impersonation"
 }
 
+// parseTargetContainerNames parses container names from the inject-container-names annotation
+// Returns nil if annotation is not present (meaning inject into all containers)
+func parseTargetContainerNames(pod *corev1.Pod) []string {
+	if pod.Annotations == nil {
+		return nil
+	}
+
+	containerNamesAnnotation, exists := pod.Annotations["workload-identity.io/inject-container-names"]
+	if !exists || containerNamesAnnotation == "" {
+		return nil
+	}
+
+	// Split by comma and trim whitespace
+	var containerNames []string
+	for _, name := range strings.Split(containerNamesAnnotation, ",") {
+		trimmed := strings.TrimSpace(name)
+		if trimmed != "" {
+			containerNames = append(containerNames, trimmed)
+		}
+	}
+
+	// If no valid container names found, return empty slice to distinguish from nil
+	if len(containerNames) == 0 {
+		return []string{}
+	}
+
+	return containerNames
+}
+
+// shouldInjectIntoContainer determines if WIF should be injected into the given container
+func shouldInjectIntoContainer(containerName string, targetContainers []string) bool {
+	// If no target containers specified, inject into all containers (default behavior)
+	if targetContainers == nil {
+		return true
+	}
+
+	// Check if container name is in the target list
+	for _, target := range targetContainers {
+		if target == containerName {
+			return true
+		}
+	}
+
+	return false
+}
+
 // injectWorkloadIdentityConfig injects WIF volumes and environment variables into pod
 func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config *WIFConfig) {
+	// Parse target container names from annotation
+	targetContainers := parseTargetContainerNames(pod)
+
+	// Log which containers will be targeted for injection
+	if targetContainers != nil {
+		podlog.Info("Targeting specific containers for WIF injection",
+			"pod", potentialPodName(pod.ObjectMeta),
+			"namespace", pod.Namespace,
+			"containers", strings.Join(targetContainers, ","))
+	}
+
 	// Get the full provider path and format as audience
 	providerPath := getWorkloadIdentityProvider()
 	audience := "//iam.googleapis.com/" + providerPath
@@ -420,94 +477,122 @@ func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config
 		}
 	}
 
-	// Add volume mounts and environment variables to all containers
+	// Define mount paths for container injection
+	tokenMountPath := "/var/run/service-account"
+	credentialsMountPath := "/etc/workload-identity"
+
+	// Add volume mounts and environment variables to targeted init containers
+	for i := range pod.Spec.InitContainers {
+		container := &pod.Spec.InitContainers[i]
+		injectIntoContainer(d, pod, container, targetContainers, tokenMountPath, credentialsVolumeName, credentialsMountPath, "init")
+	}
+
+	// Add volume mounts and environment variables to targeted regular containers
 	for i := range pod.Spec.Containers {
 		container := &pod.Spec.Containers[i]
+		injectIntoContainer(d, pod, container, targetContainers, tokenMountPath, credentialsVolumeName, credentialsMountPath, "regular")
+	}
+}
 
-		// Add volume mounts if they don't exist
-		tokenMountPath := "/var/run/service-account"
-		if !volumeMountExists(container, "token") && !mountPathExists(container, tokenMountPath) {
-			container.VolumeMounts = append(container.VolumeMounts,
-				corev1.VolumeMount{
-					Name:      "token",
-					MountPath: tokenMountPath,
-					ReadOnly:  true,
-				},
-			)
-			injectionOperations.WithLabelValues("mount", "injected", "success").Inc()
-		} else {
-			if volumeMountExists(container, "token") {
-				podlog.Info("Skipped WIF injection due to existing volume mount",
-					"pod", potentialPodName(pod.ObjectMeta),
-					"namespace", pod.Namespace,
-					"container", container.Name,
-					"component", "mount",
-					"volume", "token",
-					"reason", "volume_mount_exists")
-				injectionOperations.WithLabelValues("mount", "skipped", "volume_mount_exists").Inc()
-			}
-			if mountPathExists(container, tokenMountPath) {
-				podlog.Info("Skipped WIF injection due to mount path conflict",
-					"pod", potentialPodName(pod.ObjectMeta),
-					"namespace", pod.Namespace,
-					"container", container.Name,
-					"component", "mount",
-					"path", tokenMountPath,
-					"reason", "path_conflict")
-				injectionOperations.WithLabelValues("mount", "skipped", "path_conflict").Inc()
-			}
-		}
+// injectIntoContainer handles injection logic for a single container (init or regular)
+func injectIntoContainer(d *PodCustomDefaulter, pod *corev1.Pod, container *corev1.Container, targetContainers []string, tokenMountPath, credentialsVolumeName, credentialsMountPath, containerType string) {
+	// Check if this container should receive WIF injection
+	if !shouldInjectIntoContainer(container.Name, targetContainers) {
+		podlog.V(1).Info("Skipping container - not in target list",
+			"pod", potentialPodName(pod.ObjectMeta),
+			"namespace", pod.Namespace,
+			"container", container.Name,
+			"containerType", containerType)
+		injectionOperations.WithLabelValues("container", "skipped", "not_targeted").Inc()
+		return
+	}
 
-		credentialsMountPath := "/etc/workload-identity"
-		if !volumeMountExists(container, credentialsVolumeName) && !mountPathExists(container, credentialsMountPath) {
-			container.VolumeMounts = append(container.VolumeMounts,
-				corev1.VolumeMount{
-					Name:      credentialsVolumeName,
-					MountPath: credentialsMountPath,
-					ReadOnly:  true,
-				},
-			)
-			injectionOperations.WithLabelValues("mount", "injected", "success").Inc()
-		} else {
-			if volumeMountExists(container, credentialsVolumeName) {
-				podlog.Info("Skipped WIF injection due to existing volume mount",
-					"pod", potentialPodName(pod.ObjectMeta),
-					"namespace", pod.Namespace,
-					"container", container.Name,
-					"component", "mount",
-					"volume", credentialsVolumeName,
-					"reason", "volume_mount_exists")
-				injectionOperations.WithLabelValues("mount", "skipped", "volume_mount_exists").Inc()
-			}
-			if mountPathExists(container, credentialsMountPath) {
-				podlog.Info("Skipped WIF injection due to mount path conflict",
-					"pod", potentialPodName(pod.ObjectMeta),
-					"namespace", pod.Namespace,
-					"container", container.Name,
-					"component", "mount",
-					"path", credentialsMountPath,
-					"reason", "path_conflict")
-				injectionOperations.WithLabelValues("mount", "skipped", "path_conflict").Inc()
-			}
-		}
-
-		// Add environment variable if it doesn't exist
-		if !envVarExists(container, "GOOGLE_APPLICATION_CREDENTIALS") {
-			container.Env = append(container.Env, corev1.EnvVar{
-				Name:  "GOOGLE_APPLICATION_CREDENTIALS",
-				Value: "/etc/workload-identity/credentials.json",
-			})
-			injectionOperations.WithLabelValues("env", "injected", "success").Inc()
-		} else {
-			podlog.Info("Skipped WIF injection due to existing environment variable",
+	// Add volume mounts if they don't exist
+	if !volumeMountExists(container, "token") && !mountPathExists(container, tokenMountPath) {
+		container.VolumeMounts = append(container.VolumeMounts,
+			corev1.VolumeMount{
+				Name:      "token",
+				MountPath: tokenMountPath,
+				ReadOnly:  true,
+			},
+		)
+		injectionOperations.WithLabelValues("mount", "injected", "success").Inc()
+	} else {
+		if volumeMountExists(container, "token") {
+			podlog.Info("Skipped WIF injection due to existing volume mount",
 				"pod", potentialPodName(pod.ObjectMeta),
 				"namespace", pod.Namespace,
 				"container", container.Name,
-				"component", "env",
-				"env", "GOOGLE_APPLICATION_CREDENTIALS",
-				"reason", "already_exists")
-			injectionOperations.WithLabelValues("env", "skipped", "already_exists").Inc()
+				"containerType", containerType,
+				"component", "mount",
+				"volume", "token",
+				"reason", "volume_mount_exists")
+			injectionOperations.WithLabelValues("mount", "skipped", "volume_mount_exists").Inc()
 		}
+		if mountPathExists(container, tokenMountPath) {
+			podlog.Info("Skipped WIF injection due to mount path conflict",
+				"pod", potentialPodName(pod.ObjectMeta),
+				"namespace", pod.Namespace,
+				"container", container.Name,
+				"containerType", containerType,
+				"component", "mount",
+				"path", tokenMountPath,
+				"reason", "path_conflict")
+			injectionOperations.WithLabelValues("mount", "skipped", "path_conflict").Inc()
+		}
+	}
+
+	if !volumeMountExists(container, credentialsVolumeName) && !mountPathExists(container, credentialsMountPath) {
+		container.VolumeMounts = append(container.VolumeMounts,
+			corev1.VolumeMount{
+				Name:      credentialsVolumeName,
+				MountPath: credentialsMountPath,
+				ReadOnly:  true,
+			},
+		)
+		injectionOperations.WithLabelValues("mount", "injected", "success").Inc()
+	} else {
+		if volumeMountExists(container, credentialsVolumeName) {
+			podlog.Info("Skipped WIF injection due to existing volume mount",
+				"pod", potentialPodName(pod.ObjectMeta),
+				"namespace", pod.Namespace,
+				"container", container.Name,
+				"containerType", containerType,
+				"component", "mount",
+				"volume", credentialsVolumeName,
+				"reason", "volume_mount_exists")
+			injectionOperations.WithLabelValues("mount", "skipped", "volume_mount_exists").Inc()
+		}
+		if mountPathExists(container, credentialsMountPath) {
+			podlog.Info("Skipped WIF injection due to mount path conflict",
+				"pod", potentialPodName(pod.ObjectMeta),
+				"namespace", pod.Namespace,
+				"container", container.Name,
+				"containerType", containerType,
+				"component", "mount",
+				"path", credentialsMountPath,
+				"reason", "path_conflict")
+			injectionOperations.WithLabelValues("mount", "skipped", "path_conflict").Inc()
+		}
+	}
+
+	// Add environment variable if it doesn't exist
+	if !envVarExists(container, "GOOGLE_APPLICATION_CREDENTIALS") {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "GOOGLE_APPLICATION_CREDENTIALS",
+			Value: "/etc/workload-identity/credentials.json",
+		})
+		injectionOperations.WithLabelValues("env", "injected", "success").Inc()
+	} else {
+		podlog.Info("Skipped WIF injection due to existing environment variable",
+			"pod", potentialPodName(pod.ObjectMeta),
+			"namespace", pod.Namespace,
+			"container", container.Name,
+			"containerType", containerType,
+			"component", "env",
+			"env", "GOOGLE_APPLICATION_CREDENTIALS",
+			"reason", "already_exists")
+		injectionOperations.WithLabelValues("env", "skipped", "already_exists").Inc()
 	}
 }
 
