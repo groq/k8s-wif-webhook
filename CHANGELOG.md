@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/groq/k8s-wif-webhook/compare/v1.0.0...v1.1.0) (2025-08-25)
+
+
+### Features
+
+* add multi-container and init container support for WIF injection ([#8](https://github.com/groq/k8s-wif-webhook/issues/8)) ([66b6cea](https://github.com/groq/k8s-wif-webhook/commit/66b6ceaa21505dd8a1aeca347cf8974c7659fd42))
+
 ## [1.0.0](https://github.com/groq/k8s-wif-webhook/compare/v0.5.2...v1.0.0) (2025-08-04)
 
 
