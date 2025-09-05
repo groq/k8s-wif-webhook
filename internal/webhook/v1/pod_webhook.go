@@ -20,6 +20,7 @@ package v1
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 
 import (
 	"context"
@@ -40,6 +41,11 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	"github.com/groq/k8s-wif-webhook/internal/webhook/v1/config"
+	"github.com/groq/k8s-wif-webhook/internal/webhook/v1/development"
+	"github.com/groq/k8s-wif-webhook/internal/webhook/v1/production"
+	"github.com/groq/k8s-wif-webhook/internal/webhook/v1/volume"
 )
 
 // nolint:unused
@@ -78,11 +84,57 @@ func init() {
 
 // SetupPodWebhookWithManager registers the webhook for Pod in the manager.
 func SetupPodWebhookWithManager(mgr ctrl.Manager) error {
+	// Load webhook configuration
+	webhookConfig := config.LoadFromEnvironment()
+
+	// Validate configuration
+	if err := webhookConfig.Validate(); err != nil {
+		return fmt.Errorf("invalid webhook configuration: %w", err)
+	}
+
+	// Create volume manager
+	volumeManager := volume.NewDefaultVolumeManager()
+
+	// Create credentials provider based on mode
+	var credentialsProvider config.CredentialsProvider
+
+	if webhookConfig.IsDevelopmentMode() {
+		// Development mode - use local gcloud credentials
+		// Credentials are synced on-demand when pods are processed
+		credentialsProvider = development.NewDevCredentialsProvider(
+			mgr.GetClient(),
+			volumeManager,
+			webhookConfig.DevCredentialsPath,
+		)
+	} else {
+		// Production mode - use WIF
+		credentialsProvider = production.NewWIFCredentialsProvider(
+			mgr.GetClient(),
+			mgr.GetCache(),
+			mgr.GetEventRecorderFor("k8s-wif-webhook"),
+			volumeManager,
+			webhookConfig,
+		)
+	}
+
+	// Setup credentials provider
+	if credentialsProvider.RequiresSetup() {
+		if err := credentialsProvider.Setup(); err != nil {
+			return fmt.Errorf("failed to setup credentials provider: %w", err)
+		}
+	}
+
+	podlog.Info("Starting webhook",
+		"mode", webhookConfig.Mode,
+		"credentialsProvider", credentialsProvider.GetCredentialType())
+
 	return ctrl.NewWebhookManagedBy(mgr).For(&corev1.Pod{}).
 		WithDefaulter(&PodCustomDefaulter{
-			Client:   mgr.GetClient(),
-			Cache:    mgr.GetCache(),
-			Recorder: mgr.GetEventRecorderFor("k8s-wif-webhook"),
+			Client:              mgr.GetClient(),
+			Cache:               mgr.GetCache(),
+			Recorder:            mgr.GetEventRecorderFor("k8s-wif-webhook"),
+			credentialsProvider: credentialsProvider,
+			webhookConfig:       webhookConfig,
 		}).
 		Complete()
 }
@@ -96,9 +148,11 @@ func SetupPodWebhookWithManager(mgr ctrl.Manager) error {
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as it is used only for temporary operations and does not need to be deeply copied.
 type PodCustomDefaulter struct {
-	Client   client.Client
-	Cache    client.Reader
-	Recorder record.EventRecorder
+	Client              client.Client
+	Cache               client.Reader
+	Recorder            record.EventRecorder
+	credentialsProvider config.CredentialsProvider
+	webhookConfig       *config.Config
 }
 
 var _ webhook.CustomDefaulter = &PodCustomDefaulter{}
@@ -123,58 +177,40 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj runtime.Object) er
 	}
 
 	podName := potentialPodName(pod.ObjectMeta)
-	podlog.Info("Processing pod for WIF injection", "pod", podName, "namespace", pod.Namespace)
+	podlog.Info("Processing pod for credential injection",
+		"pod", podName,
+		"namespace", pod.Namespace,
+		"mode", d.webhookConfig.Mode,
+		"credentialsType", d.credentialsProvider.GetCredentialType())
 
-	// Skip if pod already has WIF volumes/env vars
-	if hasWorkloadIdentityConfig(pod) {
+	// Skip if pod already has credentials configuration
+	if hasCredentialsConfig(pod) {
+		podlog.V(1).Info("Pod already has credentials configuration, skipping injection",
+			"pod", podName, "namespace", pod.Namespace)
 		return nil
 	}
 
-	// Get ServiceAccount to check for WIF annotations
-	sa := &corev1.ServiceAccount{}
-	saName := pod.Spec.ServiceAccountName
-	if saName == "" {
-		saName = "default"
-	}
-
-	// Use cache consistently for reads (best practice)
-	reader := d.Cache
-	if reader == nil {
-		reader = d.Client // Fallback to direct client only if cache not available
-	}
-
-	err := reader.Get(ctx, types.NamespacedName{
-		Name:      saName,
-		Namespace: pod.Namespace,
-	}, sa)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			podlog.Error(err, "ServiceAccount not found, failing admission", "name", saName, "namespace", pod.Namespace)
-			return fmt.Errorf("ServiceAccount %s/%s not found: %w", pod.Namespace, saName, err)
-		}
-		podlog.Error(err, "Failed to get ServiceAccount, failing admission", "name", saName, "namespace", pod.Namespace)
-		return fmt.Errorf("failed to lookup ServiceAccount %s/%s: %w", pod.Namespace, saName, err)
-	}
-
-	// Check if WIF injection is disabled (opt-out logic)
-	if isWIFInjectionDisabled(ctx, reader, pod, sa) {
+	// Check if injection is disabled (opt-out logic)
+	if d.isInjectionDisabled(ctx, pod) {
+		podlog.V(1).Info("Credential injection disabled for pod",
+			"pod", podName, "namespace", pod.Namespace)
 		return nil
 	}
 
-	// Extract WIF configuration (defaults to direct identity)
-	wifConfig := extractWIFConfig(sa)
-
-	// Ensure required ConfigMaps exist (create on-demand)
-	err = d.ensureConfigMaps(ctx, pod.Namespace, wifConfig, pod, sa)
-	if err != nil {
-		podlog.Error(err, "Failed to ensure ConfigMaps", "namespace", pod.Namespace)
-		return err
+	// Inject credentials using the configured provider
+	if err := d.credentialsProvider.InjectCredentials(pod, pod.Namespace); err != nil {
+		podlog.Error(err, "Failed to inject credentials",
+			"pod", podName,
+			"namespace", pod.Namespace,
+			"credentialsType", d.credentialsProvider.GetCredentialType())
+		return fmt.Errorf("failed to inject credentials: %w", err)
 	}
 
-	// Inject WIF configuration
-	injectWorkloadIdentityConfig(d, pod, wifConfig)
+	podlog.Info("Successfully injected credentials",
+		"pod", podName,
+		"namespace", pod.Namespace,
+		"credentialsType", d.credentialsProvider.GetCredentialType())
 
-	podlog.Info("Injected WIF configuration", "pod", podName, "namespace", pod.Namespace, "serviceAccount", saName)
 	return nil
 }
 
@@ -185,9 +221,18 @@ type WIFConfig struct {
 	CredentialsConfigMap string
 }
 
-// hasWorkloadIdentityConfig checks if pod already has WIF configuration
-func hasWorkloadIdentityConfig(pod *corev1.Pod) bool {
-	// Check for projected token volume
+// hasCredentialsConfig checks if pod already has any credential configuration
+func hasCredentialsConfig(pod *corev1.Pod) bool {
+	// Check for GOOGLE_APPLICATION_CREDENTIALS environment variable in all containers
+	for _, container := range append(pod.Spec.Containers, pod.Spec.InitContainers...) {
+		for _, env := range container.Env {
+			if env.Name == "GOOGLE_APPLICATION_CREDENTIALS" {
+				return true
+			}
+		}
+	}
+
+	// Check for WIF projected token volume (production mode)
 	for _, volume := range pod.Spec.Volumes {
 		if volume.Projected != nil {
 			for _, source := range volume.Projected.Sources {
@@ -199,10 +244,45 @@ func hasWorkloadIdentityConfig(pod *corev1.Pod) bool {
 		}
 	}
 
-	// Check for GOOGLE_APPLICATION_CREDENTIALS env var
-	for _, container := range pod.Spec.Containers {
-		for _, env := range container.Env {
-			if env.Name == "GOOGLE_APPLICATION_CREDENTIALS" {
+	// Check for development credentials volume
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name == development.DevCredentialsVolumeName {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isInjectionDisabled checks if credential injection is disabled for the pod
+func (d *PodCustomDefaulter) isInjectionDisabled(ctx context.Context, pod *corev1.Pod) bool {
+	// Check pod-level annotation (highest precedence)
+	if pod.Annotations != nil {
+		if inject, exists := pod.Annotations["workload-identity.io/inject"]; exists {
+			if inject == "false" {
+				return true
+			}
+		}
+	}
+
+	// Check namespace-level annotation
+	ns := &corev1.Namespace{}
+	reader := d.Cache
+	if reader == nil {
+		reader = d.Client
+	}
+
+	err := reader.Get(ctx, types.NamespacedName{Name: pod.Namespace}, ns)
+	if err != nil {
+		// If we can't read the namespace, don't disable injection
+		podlog.V(1).Info("Unable to read namespace for injection check",
+			"namespace", pod.Namespace, "error", err.Error())
+		return false
+	}
+
+	if ns.Annotations != nil {
+		if injection, exists := ns.Annotations["workload-identity.io/injection"]; exists {
+			if injection == "disabled" {
 				return true
 			}
 		}
@@ -212,6 +292,7 @@ func hasWorkloadIdentityConfig(pod *corev1.Pod) bool {
 }
 
 // isWIFInjectionDisabled checks if WIF injection should be skipped (Istio-style opt-out)
+// DEPRECATED: Use PodCustomDefaulter.isInjectionDisabled instead
 func isWIFInjectionDisabled(ctx context.Context, reader client.Reader, pod *corev1.Pod, sa *corev1.ServiceAccount) bool {
 	// Check pod-level opt-out label (highest precedence)
 	if pod.Labels != nil {

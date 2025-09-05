@@ -28,9 +28,37 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/groq/k8s-wif-webhook/internal/webhook/v1/config"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// mockCredentialsProvider implements CredentialsProvider for testing
+type mockCredentialsProvider struct{}
+
+func (m *mockCredentialsProvider) InjectCredentials(pod *corev1.Pod, namespace string) error {
+	// Mock implementation - add GOOGLE_APPLICATION_CREDENTIALS env var to first container
+	if len(pod.Spec.Containers) > 0 {
+		pod.Spec.Containers[0].Env = append(pod.Spec.Containers[0].Env, corev1.EnvVar{
+			Name:  "GOOGLE_APPLICATION_CREDENTIALS",
+			Value: "/etc/workload-identity/credentials.json",
+		})
+	}
+	return nil
+}
+
+func (m *mockCredentialsProvider) GetCredentialType() string {
+	return "mock"
+}
+
+func (m *mockCredentialsProvider) RequiresSetup() bool {
+	return false
+}
+
+func (m *mockCredentialsProvider) Setup() error {
+	return nil
+}
 
 func TestInjectWorkloadIdentityConfig(t *testing.T) {
 	// Set required environment variables for testing
@@ -952,9 +980,21 @@ func TestPodWebhookIntegration(t *testing.T) {
 		WithObjects(testSA).
 		Build()
 
+	// Create a mock credentials provider for testing
+	mockCredentialsProvider := &mockCredentialsProvider{}
+
+	// Create webhook config for testing
+	testConfig := &config.Config{
+		Mode:                     config.ProductionMode,
+		WorkloadIdentityProvider: "projects/123456789/locations/global/workloadIdentityPools/test-pool/providers/test-provider",
+		GoogleCloudProject:       "test-project",
+	}
+
 	webhook := &PodCustomDefaulter{
-		Client: fakeClient,
-		Cache:  fakeClient,
+		Client:              fakeClient,
+		Cache:               fakeClient,
+		credentialsProvider: mockCredentialsProvider,
+		webhookConfig:       testConfig,
 	}
 
 	ctx := context.Background()
@@ -1015,22 +1055,17 @@ func TestPodWebhookIntegration(t *testing.T) {
 			err := webhook.Default(ctx, tt.pod)
 			require.NoError(t, err)
 
-			// Verify WIF injection occurred
-			assert.True(t, hasWorkloadIdentityConfig(tt.pod), "WIF configuration should be injected")
-
-			// Verify volumes were added
-			assert.Len(t, tt.pod.Spec.Volumes, 2, "Should have token and credentials volumes")
+			// Verify credentials injection occurred
+			assert.True(t, hasCredentialsConfig(tt.pod), "Credentials configuration should be injected")
 
 			// Verify container modifications
 			require.Len(t, tt.pod.Spec.Containers, 1, "Should still have one container")
 			container := tt.pod.Spec.Containers[0]
 
-			// Check volume mounts
-			assert.Len(t, container.VolumeMounts, 2, "Should have WIF volume mounts")
-
-			// Check environment variable
+			// Check environment variable was added by mock provider
 			assert.Len(t, container.Env, 1, "Should have GOOGLE_APPLICATION_CREDENTIALS env var")
 			assert.Equal(t, "GOOGLE_APPLICATION_CREDENTIALS", container.Env[0].Name)
+			assert.Equal(t, "/etc/workload-identity/credentials.json", container.Env[0].Value)
 		})
 	}
 }

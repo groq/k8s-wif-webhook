@@ -62,6 +62,12 @@ patches:
 - path: manager_webhook_patch.yaml
   target:
     kind: Deployment
+# [WEBHOOK_CONFIG] Webhook configuration patch
+- path: manager_webhook_config_patch.yaml
+  target:
+    kind: Deployment
+  target:
+    kind: Deployment
 - path: webhook_namespace_selector_patch.yaml
   target:
     kind: MutatingWebhookConfiguration
