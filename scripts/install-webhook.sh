@@ -15,6 +15,8 @@ IMAGE_TAG="${IMAGE_TAG:-latest}"
 NAMESPACE="${NAMESPACE:-workload-identity-system}"
 WORKLOAD_IDENTITY_PROVIDER="${WORKLOAD_IDENTITY_PROVIDER:-}"
 GOOGLE_CLOUD_PROJECT="${GOOGLE_CLOUD_PROJECT:-}"
+WEBHOOK_MODE="${WEBHOOK_MODE:-development}"
+DEV_CREDENTIALS_PATH="${DEV_CREDENTIALS_PATH:-$HOME/.config/gcloud/application_default_credentials.json}"
 
 # Function to print colored output
 log() {
@@ -57,8 +59,32 @@ wait_for_pods() {
 create_kind_cluster() {
     log "INFO" "Creating kind cluster: $CLUSTER_NAME"
     
-    # Create a kind cluster configuration with at least one worker node
-    cat <<EOF | kind create cluster --name "$CLUSTER_NAME" --config=-
+    if [[ "$WEBHOOK_MODE" == "development" ]]; then
+        # Create a kind cluster configuration with host path mounts for development mode
+        log "INFO" "Configuring Kind cluster for development mode with gcloud credentials"
+        cat <<EOF | kind create cluster --name "$CLUSTER_NAME" --config=-
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+- role: control-plane
+  extraMounts:
+  - hostPath: $(dirname "$DEV_CREDENTIALS_PATH")
+    containerPath: /host-gcloud
+    readOnly: true
+- role: worker
+  extraMounts:
+  - hostPath: $(dirname "$DEV_CREDENTIALS_PATH")
+    containerPath: /host-gcloud
+    readOnly: true
+- role: worker
+  extraMounts:
+  - hostPath: $(dirname "$DEV_CREDENTIALS_PATH")
+    containerPath: /host-gcloud
+    readOnly: true
+EOF
+    else
+        # Create a standard kind cluster for production mode
+        cat <<EOF | kind create cluster --name "$CLUSTER_NAME" --config=-
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
@@ -66,6 +92,7 @@ nodes:
 - role: worker
 - role: worker
 EOF
+    fi
 
     log "SUCCESS" "Kind cluster '$CLUSTER_NAME' created successfully"
 }
@@ -119,13 +146,12 @@ deploy_webhook() {
     log "SUCCESS" "k8s-wif-webhook deployed successfully"
 }
 
-# Function to create WIF configuration patch if environment variables are provided
-create_wif_config() {
-    if [[ -n "$WORKLOAD_IDENTITY_PROVIDER" && -n "$GOOGLE_CLOUD_PROJECT" ]]; then
-        log "INFO" "Creating WIF configuration patch..."
-        
-        cat <<EOF > config/default/manager_wif_config_patch.yaml
-# WIF Configuration Patch
+# Function to create webhook configuration patch
+create_webhook_config() {
+    log "INFO" "Creating webhook configuration patch for mode: $WEBHOOK_MODE"
+    
+    cat <<EOF > config/default/manager_webhook_config_patch.yaml
+# Webhook Configuration Patch
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -137,19 +163,79 @@ spec:
       containers:
       - name: manager
         env:
+        - name: WEBHOOK_MODE
+          value: "$WEBHOOK_MODE"
+EOF
+
+    if [[ "$WEBHOOK_MODE" == "production" ]]; then
+        if [[ -n "$WORKLOAD_IDENTITY_PROVIDER" && -n "$GOOGLE_CLOUD_PROJECT" ]]; then
+            cat <<EOF >> config/default/manager_webhook_config_patch.yaml
         - name: WORKLOAD_IDENTITY_PROVIDER
           value: "$WORKLOAD_IDENTITY_PROVIDER"
         - name: GOOGLE_CLOUD_PROJECT
           value: "$GOOGLE_CLOUD_PROJECT"
 EOF
+            log "SUCCESS" "Production WIF configuration added"
+        else
+            log "ERROR" "Production mode requires WORKLOAD_IDENTITY_PROVIDER and GOOGLE_CLOUD_PROJECT"
+            return 1
+        fi
+    elif [[ "$WEBHOOK_MODE" == "development" ]]; then
+        # Check if gcloud credentials exist
+        if [[ ! -f "$DEV_CREDENTIALS_PATH" ]]; then
+            log "ERROR" "Development credentials not found at $DEV_CREDENTIALS_PATH"
+            log "ERROR" "Please run: gcloud auth application-default login"
+            return 1
+        fi
         
-        # Uncomment the WIF patch in kustomization.yaml
-        sed -i.bak 's/# - path: manager_wif_config_patch.yaml/- path: manager_wif_config_patch.yaml/' config/default/kustomization.yaml
-        
-        log "SUCCESS" "WIF configuration patch created"
-    else
-        log "WARN" "WORKLOAD_IDENTITY_PROVIDER and/or GOOGLE_CLOUD_PROJECT not set, skipping WIF configuration"
+        cat <<EOF >> config/default/manager_webhook_config_patch.yaml
+        - name: DEV_CREDENTIALS_PATH
+          value: "/host-gcloud/application_default_credentials.json"
+        volumeMounts:
+        - name: gcloud-credentials
+          mountPath: /host-gcloud
+          readOnly: true
+      volumes:
+      - name: gcloud-credentials
+        hostPath:
+          path: /host-gcloud
+          type: Directory
+EOF
+        log "SUCCESS" "Development mode configuration added"
+        log "INFO" "Mounting host gcloud credentials from: $DEV_CREDENTIALS_PATH"
     fi
+    
+    # Add the patch to kustomization.yaml if not already present  
+    if ! grep -q "manager_webhook_config_patch.yaml" config/default/kustomization.yaml; then
+        # Create a backup and add the patch entry to the patches section
+        cp config/default/kustomization.yaml config/default/kustomization.yaml.bak
+        
+        # Find the webhook patch line and add target + our config patch after it
+        python3 -c "
+import sys
+lines = []
+with open('config/default/kustomization.yaml', 'r') as f:
+    lines = f.readlines()
+
+output = []
+for i, line in enumerate(lines):
+    output.append(line)
+    if 'manager_webhook_patch.yaml' in line and line.strip().startswith('- path:'):
+        # Add target for the existing webhook patch
+        output.append('  target:\n')
+        output.append('    kind: Deployment\n')
+        # Add our webhook config patch
+        output.append('# [WEBHOOK_CONFIG] Webhook configuration patch\n')
+        output.append('- path: manager_webhook_config_patch.yaml\n')
+        output.append('  target:\n')
+        output.append('    kind: Deployment\n')
+
+with open('config/default/kustomization.yaml', 'w') as f:
+    f.writelines(output)
+"
+    fi
+    
+    log "SUCCESS" "Webhook configuration patch created"
 }
 
 # Function to verify installation
@@ -192,24 +278,35 @@ Install k8s-wif-webhook in a kind cluster.
 OPTIONS:
     -n, --cluster-name CLUSTER_NAME        Name of the kind cluster (default: k8s-wif-webhook)
     -t, --image-tag IMAGE_TAG              Docker image tag (default: latest)
-    -w, --wif-provider WIF_PROVIDER        Workload Identity Provider path
-    -p, --project GCP_PROJECT              GCP Project ID
+    -w, --wif-provider WIF_PROVIDER        Workload Identity Provider path (production mode)
+    -p, --project GCP_PROJECT              GCP Project ID (production mode)
+    -m, --mode MODE                        Webhook mode: development (default) or production
+    -d, --dev-credentials DEV_PATH         Path to gcloud credentials (development mode)
     -h, --help                            Show this help message
 
 ENVIRONMENT VARIABLES:
     CLUSTER_NAME                          Kind cluster name
     IMAGE_TAG                             Docker image tag
-    WORKLOAD_IDENTITY_PROVIDER            WIF provider path
-    GOOGLE_CLOUD_PROJECT                  GCP project ID
+    WEBHOOK_MODE                          Webhook mode (development or production)
+    WORKLOAD_IDENTITY_PROVIDER            WIF provider path (production mode)
+    GOOGLE_CLOUD_PROJECT                  GCP project ID (production mode)
+    DEV_CREDENTIALS_PATH                  Path to gcloud credentials (development mode)
 
 EXAMPLES:
     # Basic installation
     $0
 
-    # Installation with custom cluster name and WIF config
-    $0 --cluster-name my-cluster --wif-provider "projects/123/locations/global/workloadIdentityPools/pool/providers/provider" --project "my-project"
+    # Development mode (default)
+    $0
 
-    # Installation using environment variables
+    # Production mode with WIF configuration
+    $0 --mode production --wif-provider "projects/123/locations/global/workloadIdentityPools/pool/providers/provider" --project "my-project"
+
+    # Development mode with custom credentials path
+    $0 --mode development --dev-credentials "/path/to/custom/credentials.json"
+
+    # Using environment variables for production
+    WEBHOOK_MODE="production" \\
     WORKLOAD_IDENTITY_PROVIDER="projects/123/locations/global/workloadIdentityPools/pool/providers/provider" \\
     GOOGLE_CLOUD_PROJECT="my-project" \\
     $0
@@ -236,6 +333,14 @@ while [[ $# -gt 0 ]]; do
             GOOGLE_CLOUD_PROJECT="$2"
             shift 2
             ;;
+        -m|--mode)
+            WEBHOOK_MODE="$2"
+            shift 2
+            ;;
+        -d|--dev-credentials)
+            DEV_CREDENTIALS_PATH="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -253,6 +358,7 @@ main() {
     log "INFO" "Starting k8s-wif-webhook installation..."
     log "INFO" "Cluster name: $CLUSTER_NAME"
     log "INFO" "Image tag: $IMAGE_TAG"
+    log "INFO" "Webhook mode: $WEBHOOK_MODE"
     
     # Check required tools
     local missing_tools=()
@@ -282,8 +388,8 @@ main() {
     # Install cert-manager (required for webhook certificates)
     install_cert_manager
     
-    # Create WIF configuration if provided
-    create_wif_config
+    # Create webhook configuration
+    create_webhook_config
     
     # Build and load the webhook image
     build_and_load_image
@@ -302,8 +408,17 @@ main() {
     echo -e "1. Test the webhook by creating a test pod:"
     echo -e "   ${BLUE}kubectl run test-pod --image=nginx --restart=Never${NC}"
     echo ""
-    echo -e "2. Check if WIF configuration was injected:"
-    echo -e "   ${BLUE}kubectl get pod test-pod -o yaml | grep -A 10 -B 10 GOOGLE_APPLICATION_CREDENTIALS${NC}"
+    if [[ "$WEBHOOK_MODE" == "development" ]]; then
+        echo -e "2. Check if development credentials were injected:"
+        echo -e "   ${BLUE}kubectl get pod test-pod -o yaml | grep -A 10 -B 10 GOOGLE_APPLICATION_CREDENTIALS${NC}"
+        echo ""
+        echo -e "   Expected path: ${BLUE}/var/secrets/google/application_default_credentials.json${NC}"
+    else
+        echo -e "2. Check if WIF configuration was injected:"
+        echo -e "   ${BLUE}kubectl get pod test-pod -o yaml | grep -A 10 -B 10 GOOGLE_APPLICATION_CREDENTIALS${NC}"
+        echo ""
+        echo -e "   Expected path: ${BLUE}/etc/workload-identity/credentials.json${NC}"
+    fi
     echo ""
     echo -e "3. Clean up test pod:"
     echo -e "   ${BLUE}kubectl delete pod test-pod${NC}"

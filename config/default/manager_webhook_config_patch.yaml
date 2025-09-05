@@ -1,0 +1,25 @@
+# Webhook Configuration Patch
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: system
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        env:
+        - name: WEBHOOK_MODE
+          value: "development"
+        - name: DEV_CREDENTIALS_PATH
+          value: "/host-gcloud/application_default_credentials.json"
+        volumeMounts:
+        - name: gcloud-credentials
+          mountPath: /host-gcloud
+          readOnly: true
+      volumes:
+      - name: gcloud-credentials
+        hostPath:
+          path: /host-gcloud
+          type: Directory
