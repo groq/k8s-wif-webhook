@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/groq/k8s-wif-webhook/compare/v1.1.0...v1.1.1) (2025-09-30)
+
+
+### Bug Fixes
+
+* create servicemonitor ([#12](https://github.com/groq/k8s-wif-webhook/issues/12)) ([8e2443c](https://github.com/groq/k8s-wif-webhook/commit/8e2443c9fc7007c225d99e67b27daf737ee2dc32))
+
 ## [1.1.0](https://github.com/groq/k8s-wif-webhook/compare/v1.0.0...v1.1.0) (2025-08-25)
 
 
