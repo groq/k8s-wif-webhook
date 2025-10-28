@@ -33,6 +33,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -268,16 +269,72 @@ func (d *PodCustomDefaulter) ensureConfigMaps(ctx context.Context, namespace str
 		reader = d.Client
 	}
 
-	existingCM := &corev1.ConfigMap{}
-	err := reader.Get(ctx, types.NamespacedName{
+	configMapKey := types.NamespacedName{
 		Name:      configMapName,
 		Namespace: namespace,
-	}, existingCM)
+	}
+
+	existingCM := &corev1.ConfigMap{}
+	err := reader.Get(ctx, configMapKey, existingCM)
+
+	credentialsData := generateCredentialsConfig(config)
+	expectedType := getConfigMapType(config)
 
 	if err == nil {
-		// ConfigMap already exists, webhook is idempotent
 		configMapOperations.WithLabelValues("get", "existing").Inc()
-		return nil
+
+		needsUpdate := configMapNeedsUpdate(existingCM, credentialsData, expectedType, config.UseDirectIdentity, sa)
+		if !needsUpdate {
+			return nil
+		}
+
+		// Fetch latest ConfigMap via client for update operation
+		targetCM := &corev1.ConfigMap{}
+		if getErr := d.Client.Get(ctx, configMapKey, targetCM); getErr != nil {
+			if apierrors.IsNotFound(getErr) {
+				// ConfigMap was deleted after cache read, treat as create path below
+				err = apierrors.NewNotFound(schema.GroupResource{Group: "", Resource: "configmaps"}, configMapName)
+			} else {
+				configMapOperations.WithLabelValues("get", "error").Inc()
+				return fmt.Errorf("failed to get ConfigMap %s/%s for update: %w", namespace, configMapName, getErr)
+			}
+		} else {
+			original := targetCM.DeepCopy()
+			if targetCM.Data == nil {
+				targetCM.Data = map[string]string{}
+			}
+			targetCM.Data["credentials.json"] = credentialsData
+
+			if targetCM.Labels == nil {
+				targetCM.Labels = map[string]string{}
+			}
+			targetCM.Labels["app.kubernetes.io/managed-by"] = "k8s-native-wif-webhook"
+			targetCM.Labels["workload-identity.io/type"] = expectedType
+
+			if config.UseDirectIdentity {
+				// Direct identity ConfigMaps are shared; retain existing owner refs
+			} else {
+				controller := true
+				targetCM.OwnerReferences = []metav1.OwnerReference{
+					{
+						APIVersion: "v1",
+						Kind:       "ServiceAccount",
+						Name:       sa.Name,
+						UID:        sa.UID,
+						Controller: &controller,
+					},
+				}
+			}
+
+			if patchErr := d.Client.Patch(ctx, targetCM, client.MergeFrom(original)); patchErr != nil {
+				configMapOperations.WithLabelValues("update", "error").Inc()
+				return fmt.Errorf("failed to update ConfigMap %s/%s: %w", namespace, configMapName, patchErr)
+			}
+
+			configMapOperations.WithLabelValues("update", "success").Inc()
+			podlog.Info("Updated WIF ConfigMap to reflect current service account configuration", "configmap", configMapName, "namespace", namespace)
+			return nil
+		}
 	}
 
 	if !apierrors.IsNotFound(err) {
@@ -287,8 +344,6 @@ func (d *PodCustomDefaulter) ensureConfigMaps(ctx context.Context, namespace str
 	}
 
 	// ConfigMap doesn't exist, create it atomically
-	credentialsData := generateCredentialsConfig(config)
-
 	cmMeta := metav1.ObjectMeta{
 		Name:      configMapName,
 		Namespace: namespace,
@@ -338,6 +393,52 @@ func (d *PodCustomDefaulter) ensureConfigMaps(ctx context.Context, namespace str
 	configMapOperations.WithLabelValues("create", "success").Inc()
 	podlog.Info("Created WIF ConfigMap on-demand", "configmap", configMapName, "namespace", namespace)
 	return nil
+}
+
+// configMapNeedsUpdate determines whether an existing ConfigMap needs to be refreshed
+func configMapNeedsUpdate(cm *corev1.ConfigMap, expectedCredentials, expectedType string, useDirectIdentity bool, sa *corev1.ServiceAccount) bool {
+	if cm.Data == nil || cm.Data["credentials.json"] != expectedCredentials {
+		return true
+	}
+
+	if cm.Labels == nil {
+		return true
+	}
+
+	if cm.Labels["app.kubernetes.io/managed-by"] != "k8s-native-wif-webhook" {
+		return true
+	}
+
+	if cm.Labels["workload-identity.io/type"] != expectedType {
+		return true
+	}
+
+	if !useDirectIdentity {
+		if len(cm.OwnerReferences) != 1 {
+			return true
+		}
+		if !ownerReferenceMatchesServiceAccount(cm.OwnerReferences, sa) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ownerReferenceMatchesServiceAccount checks if ConfigMap owner references target the provided ServiceAccount
+func ownerReferenceMatchesServiceAccount(ownerRefs []metav1.OwnerReference, sa *corev1.ServiceAccount) bool {
+	for _, ref := range ownerRefs {
+		if ref.APIVersion != "v1" || ref.Kind != "ServiceAccount" {
+			continue
+		}
+		if ref.Name != sa.Name || ref.UID != sa.UID {
+			continue
+		}
+		if ref.Controller != nil && *ref.Controller {
+			return true
+		}
+	}
+	return false
 }
 
 // getConfigMapType returns the type label for the ConfigMap

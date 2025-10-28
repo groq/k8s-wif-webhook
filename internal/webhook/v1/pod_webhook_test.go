@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime"
+	types "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -743,6 +744,79 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 		assert.Len(t, pod.Spec.Containers[0].Env, 0, "App container should have no env vars")
 	})
 
+}
+
+func TestEnsureConfigMapsUpdatesImpersonationConfigMap(t *testing.T) {
+	require.NoError(t, os.Setenv("WORKLOAD_IDENTITY_PROVIDER", "projects/123456789/locations/global/workloadIdentityPools/test-pool/providers/test-provider"))
+
+	s := runtime.NewScheme()
+	require.NoError(t, scheme.AddToScheme(s))
+
+	ctx := context.Background()
+
+	serviceAccount := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "orion",
+			Namespace: "default",
+			UID:       types.UID("new-uid"),
+			Annotations: map[string]string{
+				"iam.gke.io/gcp-service-account": "orion-staging@groq.iam.gserviceaccount.com",
+			},
+		},
+	}
+
+	oldConfig := &WIFConfig{
+		UseDirectIdentity:    false,
+		GoogleServiceAccount: "orion-dev@groq.iam.gserviceaccount.com",
+		CredentialsConfigMap: "wif-credentials-impersonation-orion",
+	}
+
+	existingConfigMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      oldConfig.CredentialsConfigMap,
+			Namespace: "default",
+			Labels: map[string]string{
+				"workload-identity.io/type": "impersonation",
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: "v1",
+					Kind:       "ServiceAccount",
+					Name:       serviceAccount.Name,
+					UID:        types.UID("old-uid"),
+					Controller: &[]bool{true}[0],
+				},
+			},
+		},
+		Data: map[string]string{
+			"credentials.json": generateCredentialsConfig(oldConfig),
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(s).WithObjects(serviceAccount, existingConfigMap).Build()
+
+	defaulter := &PodCustomDefaulter{
+		Client: client,
+		Cache:  client,
+	}
+
+	config := extractWIFConfig(serviceAccount)
+	require.NotNil(t, config)
+
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"}}
+
+	require.NoError(t, defaulter.ensureConfigMaps(ctx, "default", config, pod, serviceAccount))
+
+	updated := &corev1.ConfigMap{}
+	require.NoError(t, client.Get(ctx, types.NamespacedName{Name: config.CredentialsConfigMap, Namespace: "default"}, updated))
+
+	assert.Equal(t, generateCredentialsConfig(config), updated.Data["credentials.json"])
+	assert.Equal(t, "k8s-native-wif-webhook", updated.Labels["app.kubernetes.io/managed-by"])
+	assert.Equal(t, "impersonation", updated.Labels["workload-identity.io/type"])
+
+	if assert.Len(t, updated.OwnerReferences, 1) {
+		assert.Equal(t, serviceAccount.UID, updated.OwnerReferences[0].UID)
+	}
 }
 
 func TestParseTargetContainerNames(t *testing.T) {
