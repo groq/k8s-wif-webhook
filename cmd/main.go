@@ -37,6 +37,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	"github.com/groq/k8s-wif-webhook/internal/controller"
 	"github.com/groq/k8s-wif-webhook/internal/version"
 	webhookv1 "github.com/groq/k8s-wif-webhook/internal/webhook/v1"
 	// +kubebuilder:scaffold:imports
@@ -200,6 +201,26 @@ func main() {
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
+		os.Exit(1)
+	}
+
+	// Setup Namespace controller for direct identity ConfigMap management
+	if err = (&controller.NamespaceReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("wif-namespace-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Namespace")
+		os.Exit(1)
+	}
+
+	// Setup ServiceAccount controller for impersonation ConfigMap reconciliation
+	if err = (&controller.ServiceAccountReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("wif-serviceaccount-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "ServiceAccount")
 		os.Exit(1)
 	}
 
