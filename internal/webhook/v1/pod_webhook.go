@@ -17,15 +17,13 @@ limitations under the License.
 package v1
 
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -40,6 +38,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	"github.com/groq/k8s-wif-webhook/internal/wif"
 )
 
 // nolint:unused
@@ -47,12 +47,12 @@ import (
 var podlog = logf.Log.WithName("pod-resource")
 
 var (
-	// configMapOperations tracks ConfigMap creation/update operations
-	// (controller-runtime already provides webhook latency and request metrics)
+	// configMapOperations tracks ConfigMap creation operations
+	// Updates are handled by controllers, webhook only creates
 	configMapOperations = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "wif_configmap_operations_total",
-			Help: "Total number of ConfigMap operations",
+			Name: "wif_webhook_configmap_operations_total",
+			Help: "Total number of ConfigMap operations in webhook (create only)",
 		},
 		[]string{"operation", "result"},
 	)
@@ -162,9 +162,9 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj runtime.Object) er
 	}
 
 	// Extract WIF configuration (defaults to direct identity)
-	wifConfig := extractWIFConfig(sa)
+	wifConfig := wif.ExtractWIFConfig(sa)
 
-	// Ensure required ConfigMaps exist (create on-demand)
+	// Ensure ConfigMaps exist (atomic creation, controllers handle updates)
 	err = d.ensureConfigMaps(ctx, pod.Namespace, wifConfig, pod, sa)
 	if err != nil {
 		podlog.Error(err, "Failed to ensure ConfigMaps", "namespace", pod.Namespace)
@@ -176,13 +176,6 @@ func (d *PodCustomDefaulter) Default(ctx context.Context, obj runtime.Object) er
 
 	podlog.Info("Injected WIF configuration", "pod", podName, "namespace", pod.Namespace, "serviceAccount", saName)
 	return nil
-}
-
-// WIFConfig holds workload identity federation configuration
-type WIFConfig struct {
-	UseDirectIdentity    bool
-	GoogleServiceAccount string
-	CredentialsConfigMap string
 }
 
 // hasWorkloadIdentityConfig checks if pod already has WIF configuration
@@ -233,36 +226,12 @@ func isWIFInjectionDisabled(ctx context.Context, reader client.Reader, pod *core
 	return false
 }
 
-// extractWIFConfig extracts WIF configuration with opt-out logic (Istio-style)
-func extractWIFConfig(sa *corev1.ServiceAccount) *WIFConfig {
-	// Check for GKE-style service account impersonation annotation (takes precedence)
-	if sa.Annotations != nil {
-		if gcpSA, ok := sa.Annotations["iam.gke.io/gcp-service-account"]; ok {
-			// Use k8s ServiceAccount name for ConfigMap to enable owner references
-			configMapName := fmt.Sprintf("wif-credentials-impersonation-%s", sa.Name)
-			return &WIFConfig{
-				UseDirectIdentity:    false,
-				GoogleServiceAccount: gcpSA,
-				CredentialsConfigMap: configMapName,
-			}
-		}
-	}
-
-	// Default: Direct federated identity (opt-out behavior)
-	// Users can disable via namespace or pod labels
-	return &WIFConfig{
-		UseDirectIdentity:    true,
-		CredentialsConfigMap: "wif-credentials-direct",
-	}
-}
-
-// ensureConfigMaps creates ConfigMaps on-demand if they don't exist (idempotent)
-func (d *PodCustomDefaulter) ensureConfigMaps(ctx context.Context, namespace string, config *WIFConfig, pod *corev1.Pod, sa *corev1.ServiceAccount) error {
-	// Note: Dry-run detection is handled at the webhook framework level
-	// sideEffects: NoneOnDryRun ensures this method won't be called during dry-run
+// ensureConfigMaps atomically creates ConfigMaps if they don't exist (fast path)
+// Controllers handle updates and reconciliation
+func (d *PodCustomDefaulter) ensureConfigMaps(ctx context.Context, namespace string, config *wif.WIFConfig, pod *corev1.Pod, sa *corev1.ServiceAccount) error {
 	configMapName := config.CredentialsConfigMap
 
-	// First, check if ConfigMap already exists using cache for performance
+	// Check cache first for performance
 	reader := d.Cache
 	if reader == nil {
 		reader = d.Client
@@ -275,31 +244,29 @@ func (d *PodCustomDefaulter) ensureConfigMaps(ctx context.Context, namespace str
 	}, existingCM)
 
 	if err == nil {
-		// ConfigMap already exists, webhook is idempotent
+		// ConfigMap exists - controllers handle updates
 		configMapOperations.WithLabelValues("get", "existing").Inc()
 		return nil
 	}
 
 	if !apierrors.IsNotFound(err) {
-		// Some other error occurred during lookup
 		configMapOperations.WithLabelValues("get", "error").Inc()
 		return fmt.Errorf("failed to check ConfigMap %s/%s: %w", namespace, configMapName, err)
 	}
 
-	// ConfigMap doesn't exist, create it atomically
-	credentialsData := generateCredentialsConfig(config)
+	// ConfigMap doesn't exist - create atomically
+	credentialsData := wif.GenerateCredentialsConfig(config)
 
 	cmMeta := metav1.ObjectMeta{
 		Name:      configMapName,
 		Namespace: namespace,
 		Labels: map[string]string{
 			"app.kubernetes.io/managed-by": "k8s-native-wif-webhook",
-			"workload-identity.io/type":    getConfigMapType(config),
+			"workload-identity.io/type":    wif.GetConfigMapType(config),
 		},
 	}
 
-	// For impersonation ConfigMaps, set ServiceAccount as owner for cleanup
-	// Direct identity ConfigMaps are shared across all pods in namespace
+	// Set owner reference for impersonation ConfigMaps
 	if !config.UseDirectIdentity {
 		cmMeta.OwnerReferences = []metav1.OwnerReference{
 			{
@@ -307,7 +274,7 @@ func (d *PodCustomDefaulter) ensureConfigMaps(ctx context.Context, namespace str
 				Kind:       "ServiceAccount",
 				Name:       sa.Name,
 				UID:        sa.UID,
-				Controller: &[]bool{true}[0], // ServiceAccount controls its impersonation ConfigMap
+				Controller: &[]bool{true}[0],
 			},
 		}
 	}
@@ -319,33 +286,22 @@ func (d *PodCustomDefaulter) ensureConfigMaps(ctx context.Context, namespace str
 		},
 	}
 
-	// Attempt atomic creation
+	// Atomic creation
 	err = d.Client.Create(ctx, newCM)
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			// Race condition: another webhook instance created it concurrently
-			// This is expected and safe - webhook operation is idempotent
+			// Race condition: controller or another webhook instance created it
 			configMapOperations.WithLabelValues("create", "race_handled").Inc()
-			podlog.V(1).Info("ConfigMap created concurrently by another webhook instance", "configmap", configMapName, "namespace", namespace)
+			podlog.V(1).Info("ConfigMap created concurrently", "configmap", configMapName, "namespace", namespace)
 			return nil
 		}
-		// Actual creation failure
 		configMapOperations.WithLabelValues("create", "error").Inc()
 		return fmt.Errorf("failed to create ConfigMap %s/%s: %w", namespace, configMapName, err)
 	}
 
-	// Successfully created
 	configMapOperations.WithLabelValues("create", "success").Inc()
 	podlog.Info("Created WIF ConfigMap on-demand", "configmap", configMapName, "namespace", namespace)
 	return nil
-}
-
-// getConfigMapType returns the type label for the ConfigMap
-func getConfigMapType(config *WIFConfig) string {
-	if config.UseDirectIdentity {
-		return "direct"
-	}
-	return "impersonation"
 }
 
 // parseTargetContainerNames parses container names from the inject-container-names annotation
@@ -395,7 +351,7 @@ func shouldInjectIntoContainer(containerName string, targetContainers []string) 
 }
 
 // injectWorkloadIdentityConfig injects WIF volumes and environment variables into pod
-func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config *WIFConfig) {
+func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config *wif.WIFConfig) {
 	// Parse target container names from annotation
 	targetContainers := parseTargetContainerNames(pod)
 
@@ -408,7 +364,7 @@ func injectWorkloadIdentityConfig(d *PodCustomDefaulter, pod *corev1.Pod, config
 	}
 
 	// Get the full provider path and format as audience
-	providerPath := getWorkloadIdentityProvider()
+	providerPath := wif.GetWorkloadIdentityProvider()
 	audience := "//iam.googleapis.com/" + providerPath
 
 	// Use default token expiration (3600 seconds / 1 hour)
@@ -593,54 +549,6 @@ func injectIntoContainer(d *PodCustomDefaulter, pod *corev1.Pod, container *core
 			"env", "GOOGLE_APPLICATION_CREDENTIALS",
 			"reason", "already_exists")
 		injectionOperations.WithLabelValues("env", "skipped", "already_exists").Inc()
-	}
-}
-
-// getWorkloadIdentityProvider returns the full workload identity provider path from environment
-func getWorkloadIdentityProvider() string {
-	if provider := os.Getenv("WORKLOAD_IDENTITY_PROVIDER"); provider != "" {
-		return provider
-	}
-	return "${WORKLOAD_IDENTITY_PROVIDER}" // Fallback to template processing
-}
-
-// generateCredentialsConfig generates the credentials JSON configuration for WIF
-func generateCredentialsConfig(config *WIFConfig) string {
-	// Get the full provider path and format as audience
-	providerPath := getWorkloadIdentityProvider()
-	audience := "//iam.googleapis.com/" + providerPath
-
-	if config.UseDirectIdentity {
-		// Direct federated identity configuration
-		credConfig := map[string]interface{}{
-			"type":               "external_account",
-			"audience":           audience,
-			"subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
-			"token_url":          "https://sts.googleapis.com/v1/token",
-			"credential_source": map[string]interface{}{
-				"file": "/var/run/service-account/token",
-			},
-		}
-		data, _ := json.MarshalIndent(credConfig, "", "  ")
-		return string(data)
-	} else {
-		// Service account impersonation configuration
-		credConfig := map[string]interface{}{
-			"universe_domain":    "googleapis.com",
-			"type":               "external_account",
-			"audience":           audience,
-			"subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
-			"token_url":          "https://sts.googleapis.com/v1/token",
-			"credential_source": map[string]interface{}{
-				"file": "/var/run/service-account/token",
-				"format": map[string]interface{}{
-					"type": "text",
-				},
-			},
-			"service_account_impersonation_url": fmt.Sprintf("https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/%s:generateAccessToken", config.GoogleServiceAccount),
-		}
-		data, _ := json.MarshalIndent(credConfig, "", "  ")
-		return string(data)
 	}
 }
 
