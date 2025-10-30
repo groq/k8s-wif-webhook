@@ -18,6 +18,7 @@ package controller
 
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 import (
 	"context"
@@ -29,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -64,7 +66,8 @@ func init() {
 // NamespaceReconciler reconciles Namespace objects and ensures direct identity ConfigMaps exist
 type NamespaceReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 // SetupWithManager sets up the controller with the Manager
@@ -101,6 +104,10 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// This prevents credential access even via manual ConfigMap mounting (security requirement)
 	if r.isWIFInjectionDisabled(namespace) {
 		log.V(1).Info("Skipping namespace with WIF injection disabled", "namespace", namespace.Name)
+		if r.Recorder != nil {
+			r.Recorder.Event(namespace, corev1.EventTypeNormal, "ReconciliationSkipped",
+				"WIF injection disabled - skipping direct identity ConfigMap reconciliation")
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -158,10 +165,19 @@ func (r *NamespaceReconciler) reconcileDirectConfigMap(ctx context.Context, name
 				directConfigMapOperations.WithLabelValues("noop").Inc()
 				return nil
 			}
+			directConfigMapOperations.WithLabelValues("error").Inc()
+			if r.Recorder != nil {
+				r.Recorder.Event(namespace, corev1.EventTypeWarning, "ConfigMapCreateFailed",
+					fmt.Sprintf("Failed to create direct identity ConfigMap: %v", err))
+			}
 			return fmt.Errorf("failed to create ConfigMap %s/%s: %w", namespace.Name, directIdentityConfigMapName, err)
 		}
 
 		directConfigMapOperations.WithLabelValues("create").Inc()
+		if r.Recorder != nil {
+			r.Recorder.Event(namespace, corev1.EventTypeNormal, "ConfigMapCreated",
+				fmt.Sprintf("Created direct identity ConfigMap '%s'", directIdentityConfigMapName))
+		}
 		log.Info("Successfully created direct identity ConfigMap",
 			"configMap", directIdentityConfigMapName,
 			"namespace", namespace.Name)
@@ -184,10 +200,19 @@ func (r *NamespaceReconciler) reconcileDirectConfigMap(ctx context.Context, name
 		existingCM.Labels = desiredCM.Labels
 
 		if err := r.Update(ctx, existingCM); err != nil {
+			directConfigMapOperations.WithLabelValues("error").Inc()
+			if r.Recorder != nil {
+				r.Recorder.Event(namespace, corev1.EventTypeWarning, "ConfigMapUpdateFailed",
+					fmt.Sprintf("Failed to update direct identity ConfigMap: %v", err))
+			}
 			return fmt.Errorf("failed to update ConfigMap %s/%s: %w", namespace.Name, directIdentityConfigMapName, err)
 		}
 
 		directConfigMapOperations.WithLabelValues("update").Inc()
+		if r.Recorder != nil {
+			r.Recorder.Event(namespace, corev1.EventTypeNormal, "ConfigMapUpdated",
+				fmt.Sprintf("Updated direct identity ConfigMap '%s' (self-healing)", directIdentityConfigMapName))
+		}
 		log.Info("Successfully updated direct identity ConfigMap",
 			"configMap", directIdentityConfigMapName,
 			"namespace", namespace.Name)

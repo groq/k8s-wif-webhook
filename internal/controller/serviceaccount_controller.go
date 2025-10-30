@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -62,7 +63,8 @@ func init() {
 // ServiceAccountReconciler reconciles ServiceAccount objects with WIF annotations
 type ServiceAccountReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 // SetupWithManager sets up the controller with the Manager
@@ -99,6 +101,10 @@ func (r *ServiceAccountReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	if r.isWIFInjectionDisabled(namespace) {
 		log.V(1).Info("Skipping ServiceAccount in namespace with WIF injection disabled",
 			"serviceAccount", sa.Name, "namespace", sa.Namespace)
+		if r.Recorder != nil {
+			r.Recorder.Event(sa, corev1.EventTypeNormal, "ReconciliationSkipped",
+				"WIF injection disabled in namespace - skipping impersonation ConfigMap reconciliation")
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -180,10 +186,20 @@ func (r *ServiceAccountReconciler) reconcileConfigMap(ctx context.Context, sa *c
 				configMapReconcileOperations.WithLabelValues("noop").Inc()
 				return nil
 			}
+			configMapReconcileOperations.WithLabelValues("error").Inc()
+			if r.Recorder != nil {
+				r.Recorder.Event(sa, corev1.EventTypeWarning, "ConfigMapCreateFailed",
+					fmt.Sprintf("Failed to create impersonation ConfigMap '%s': %v", config.CredentialsConfigMap, err))
+			}
 			return fmt.Errorf("failed to create ConfigMap %s/%s: %w", sa.Namespace, config.CredentialsConfigMap, err)
 		}
 
 		configMapReconcileOperations.WithLabelValues("create").Inc()
+		if r.Recorder != nil {
+			r.Recorder.Event(sa, corev1.EventTypeNormal, "ConfigMapCreated",
+				fmt.Sprintf("Created impersonation ConfigMap '%s' for GCP service account '%s'",
+					config.CredentialsConfigMap, config.GoogleServiceAccount))
+		}
 		log.Info("Successfully created impersonation ConfigMap",
 			"configMap", config.CredentialsConfigMap,
 			"namespace", sa.Namespace)
@@ -208,10 +224,20 @@ func (r *ServiceAccountReconciler) reconcileConfigMap(ctx context.Context, sa *c
 		existingCM.OwnerReferences = desiredCM.OwnerReferences
 
 		if err := r.Update(ctx, existingCM); err != nil {
+			configMapReconcileOperations.WithLabelValues("error").Inc()
+			if r.Recorder != nil {
+				r.Recorder.Event(sa, corev1.EventTypeWarning, "ConfigMapUpdateFailed",
+					fmt.Sprintf("Failed to update impersonation ConfigMap '%s': %v", config.CredentialsConfigMap, err))
+			}
 			return fmt.Errorf("failed to update ConfigMap %s/%s: %w", sa.Namespace, config.CredentialsConfigMap, err)
 		}
 
 		configMapReconcileOperations.WithLabelValues("update").Inc()
+		if r.Recorder != nil {
+			r.Recorder.Event(sa, corev1.EventTypeNormal, "ConfigMapUpdated",
+				fmt.Sprintf("Updated impersonation ConfigMap '%s' for GCP service account '%s' (annotation change or self-healing)",
+					config.CredentialsConfigMap, config.GoogleServiceAccount))
+		}
 		log.Info("Successfully updated impersonation ConfigMap",
 			"configMap", config.CredentialsConfigMap,
 			"namespace", sa.Namespace)

@@ -296,10 +296,22 @@ func (d *PodCustomDefaulter) ensureConfigMaps(ctx context.Context, namespace str
 			return nil
 		}
 		configMapOperations.WithLabelValues("create", "error").Inc()
+		if d.Recorder != nil {
+			d.Recorder.Event(pod, corev1.EventTypeWarning, "ConfigMapCreateFailed",
+				fmt.Sprintf("Failed to create WIF ConfigMap '%s': %v", configMapName, err))
+		}
 		return fmt.Errorf("failed to create ConfigMap %s/%s: %w", namespace, configMapName, err)
 	}
 
 	configMapOperations.WithLabelValues("create", "success").Inc()
+	if d.Recorder != nil {
+		cmType := "direct identity"
+		if !config.UseDirectIdentity {
+			cmType = fmt.Sprintf("impersonation (GCP SA: %s)", config.GoogleServiceAccount)
+		}
+		d.Recorder.Event(pod, corev1.EventTypeNormal, "ConfigMapCreated",
+			fmt.Sprintf("Created WIF ConfigMap '%s' (%s)", configMapName, cmType))
+	}
 	podlog.Info("Created WIF ConfigMap on-demand", "configmap", configMapName, "namespace", namespace)
 	return nil
 }
