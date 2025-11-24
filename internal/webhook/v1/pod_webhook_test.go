@@ -25,18 +25,21 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/groq/k8s-wif-webhook/internal/wif"
 )
 
 func TestInjectWorkloadIdentityConfig(t *testing.T) {
 	// Set required environment variables for testing
 	require.NoError(t, os.Setenv("WORKLOAD_IDENTITY_PROVIDER", "projects/123456789/locations/global/workloadIdentityPools/test-pool/providers/test-provider"))
 
-	config := &WIFConfig{}
+	config := &wif.WIFConfig{}
 
 	t.Run("should inject default configuration with 3600 second expiration", func(t *testing.T) {
 		pod := &corev1.Pod{
@@ -744,6 +747,132 @@ func TestInjectWorkloadIdentityConfig(t *testing.T) {
 	})
 
 }
+
+func TestEnsureConfigMapsCreatesConfigMapAtomically(t *testing.T) {
+	require.NoError(t, os.Setenv("WORKLOAD_IDENTITY_PROVIDER", "projects/123456789/locations/global/workloadIdentityPools/test-pool/providers/test-provider"))
+	defer os.Unsetenv("WORKLOAD_IDENTITY_PROVIDER")
+
+	s := runtime.NewScheme()
+	require.NoError(t, scheme.AddToScheme(s))
+
+	ctx := context.Background()
+
+	t.Run("creates impersonation ConfigMap on first admission", func(t *testing.T) {
+		serviceAccount := &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sa",
+				Namespace: "default",
+				UID:       "test-uid-123",
+				Annotations: map[string]string{
+					"iam.gke.io/gcp-service-account": "test@project.iam.gserviceaccount.com",
+				},
+			},
+		}
+
+		client := fake.NewClientBuilder().WithScheme(s).WithObjects(serviceAccount).Build()
+
+		defaulter := &PodCustomDefaulter{
+			Client: client,
+			Cache:  client,
+		}
+
+		config := wif.ExtractWIFConfig(serviceAccount)
+		require.False(t, config.UseDirectIdentity)
+
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"}}
+
+		// First admission creates ConfigMap
+		require.NoError(t, defaulter.ensureConfigMaps(ctx, "default", config, pod, serviceAccount))
+
+		// Verify ConfigMap was created
+		cm := &corev1.ConfigMap{}
+		err := client.Get(ctx, types.NamespacedName{Name: config.CredentialsConfigMap, Namespace: "default"}, cm)
+		require.NoError(t, err)
+
+		assert.Equal(t, wif.GenerateCredentialsConfig(config), cm.Data["credentials.json"])
+		assert.Equal(t, "k8s-native-wif-webhook", cm.Labels["app.kubernetes.io/managed-by"])
+		assert.Equal(t, "impersonation", cm.Labels["workload-identity.io/type"])
+		require.Len(t, cm.OwnerReferences, 1)
+		assert.Equal(t, serviceAccount.UID, cm.OwnerReferences[0].UID)
+	})
+
+	t.Run("is idempotent when ConfigMap already exists", func(t *testing.T) {
+		serviceAccount := &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sa",
+				Namespace: "default",
+				UID:       "test-uid-456",
+				Annotations: map[string]string{
+					"iam.gke.io/gcp-service-account": "test@project.iam.gserviceaccount.com",
+				},
+			},
+		}
+
+		config := wif.ExtractWIFConfig(serviceAccount)
+
+		existingCM := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      config.CredentialsConfigMap,
+				Namespace: "default",
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": "k8s-native-wif-webhook",
+					"workload-identity.io/type":    "impersonation",
+				},
+			},
+			Data: map[string]string{
+				"credentials.json": wif.GenerateCredentialsConfig(config),
+			},
+		}
+
+		client := fake.NewClientBuilder().WithScheme(s).WithObjects(serviceAccount, existingCM).Build()
+
+		defaulter := &PodCustomDefaulter{
+			Client: client,
+			Cache:  client,
+		}
+
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"}}
+
+		// Second admission is idempotent
+		require.NoError(t, defaulter.ensureConfigMaps(ctx, "default", config, pod, serviceAccount))
+	})
+
+	t.Run("creates direct identity ConfigMap", func(t *testing.T) {
+		serviceAccount := &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "default",
+				Namespace: "default",
+				UID:       "default-uid",
+			},
+		}
+
+		client := fake.NewClientBuilder().WithScheme(s).WithObjects(serviceAccount).Build()
+
+		defaulter := &PodCustomDefaulter{
+			Client: client,
+			Cache:  client,
+		}
+
+		config := wif.ExtractWIFConfig(serviceAccount)
+		require.True(t, config.UseDirectIdentity)
+
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"}}
+
+		require.NoError(t, defaulter.ensureConfigMaps(ctx, "default", config, pod, serviceAccount))
+
+		// Verify ConfigMap was created
+		cm := &corev1.ConfigMap{}
+		err := client.Get(ctx, types.NamespacedName{Name: "wif-credentials-direct", Namespace: "default"}, cm)
+		require.NoError(t, err)
+
+		assert.Equal(t, "direct", cm.Labels["workload-identity.io/type"])
+		assert.Len(t, cm.OwnerReferences, 0, "Direct identity ConfigMaps have no owner")
+	})
+}
+
+// NOTE: ConfigMap updates are handled by controllers (ServiceAccount and Namespace controllers)
+// Webhook only performs atomic creation on first admission
+// See internal/controller/serviceaccount_controller_test.go and namespace_controller_test.go for update tests
 
 func TestParseTargetContainerNames(t *testing.T) {
 	tests := []struct {
